@@ -4,6 +4,8 @@ python-dotenv
 langchain
 langchain-groq
 langgraph
+langsmith
+groq
 deepgram-sdk
 httpx
 pydantic

@@ -1,6 +1,6 @@
-import { useState, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { Mic, MicOff, Loader2 } from 'lucide-react';
+import { Phone, PhoneOff, Loader2 } from 'lucide-react';
 import './App.css';
 
 interface Message {
@@ -12,105 +12,229 @@ interface Message {
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 function App() {
-  const [isRecording, setIsRecording] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [callStatus, setCallStatus] = useState<'idle' | 'connecting' | 'in_call' | 'ending'>('idle');
+  const [isListening, setIsListening] = useState(false);
+
+  const sessionIdRef = useRef<string | null>(null);
+  const customerIdRef = useRef<string>('user_123');
+
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const rafIdRef = useRef<number | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
+  const chunksRef = useRef<Blob[]>([]);
+  const isPlayingRef = useRef(false);
+  const silenceSinceRef = useRef<number | null>(null);
+  const recordingStartRef = useRef<number | null>(null);
 
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        
-        // Check if audio is too short (approx < 1KB)
-        if (audioBlob.size < 1024) {
-          console.warn("Audio recording too short, skipping upload.");
-          // Optional: Alert user, but console warning is less intrusive if it was an accidental click
-          return;
-        }
-
-        await sendAudioToBackend(audioBlob);
-      };
-
-      mediaRecorder.start();
-      setIsRecording(true);
-    } catch (error) {
-      console.error("Error accessing microphone:", error);
-      alert("Could not access microphone. Please ensure you have granted permission.");
+  const stopLoop = () => {
+    if (rafIdRef.current) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
     }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
-      setIsRecording(false);
-      // Stop all tracks to release microphone
-      mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => undefined);
+      audioContextRef.current = null;
+    }
+    analyserRef.current = null;
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    setIsListening(false);
+  };
+
+  useEffect(() => {
+    return () => {
+      stopLoop();
+    };
+  }, []);
+
+  const playAudioResponse = async (base64Audio: string | null) => {
+    if (!base64Audio) return;
+    isPlayingRef.current = true;
+    try {
+      const audio = new Audio(`data:audio/mp3;base64,${base64Audio}`);
+      await new Promise<void>((resolve) => {
+        audio.onended = () => resolve();
+        audio.onerror = () => resolve();
+        audio.play().catch(() => resolve());
+      });
+    } finally {
+      isPlayingRef.current = false;
     }
   };
 
-  const sendAudioToBackend = async (audioBlob: Blob) => {
+  const sendTurn = async (audioBlob: Blob) => {
+    if (!sessionIdRef.current) return;
     setIsLoading(true);
-    const formData = new FormData();
-    formData.append('audio', audioBlob, 'recording.webm');
-    // Using a static customer ID for this POC
-    formData.append('customer_id', 'user_123');
-
     try {
-      const response = await axios.post(`${API_URL}/chat`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'utterance.webm');
+      formData.append('session_id', sessionIdRef.current);
+      formData.append('customer_id', customerIdRef.current);
+
+      const response = await axios.post(`${API_URL}/call/turn`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
       });
 
-      const { user_transcript, agent_response, audio_base64 } = response.data;
+      const { user_transcript, agent_response, audio_base64 } = response.data as {
+        user_transcript: string;
+        agent_response: string;
+        audio_base64: string | null;
+      };
 
-      // Add messages to chat
-      setMessages(prev => [
-        ...prev, 
-        { role: 'user', text: user_transcript },
-        { role: 'agent', text: agent_response }
-      ]);
-
-      // Play audio response if available
-      if (audio_base64) {
-        playAudioResponse(audio_base64);
-      }
-
-    } catch (error) {
-      console.error("Error sending audio:", error);
-      if (axios.isAxiosError(error) && error.response) {
-         alert(`Error: ${error.response.data.detail || 'Server Error'}`);
-      } else {
-         alert("Error communicating with backend. Is it running?");
-      }
+      setMessages((prev) => [...prev, { role: 'user', text: user_transcript }, { role: 'agent', text: agent_response }]);
+      await playAudioResponse(audio_base64);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const playAudioResponse = (base64Audio: string) => {
-    const audio = new Audio(`data:audio/mp3;base64,${base64Audio}`);
-    audio.play().catch(e => console.error("Error playing audio:", e));
+  const startVadLoop = async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    streamRef.current = stream;
+
+    const audioContext = new AudioContext();
+    audioContextRef.current = audioContext;
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
+    analyserRef.current = analyser;
+    source.connect(analyser);
+
+    const data = new Uint8Array(analyser.fftSize);
+    const startThreshold = 0.03;
+    const stopThreshold = 0.02;
+    const silenceMsToStop = 900;
+    const minRecordMs = 450;
+
+    const tick = () => {
+      const a = analyserRef.current;
+      if (!a) return;
+
+      a.getByteTimeDomainData(data);
+      let sumSquares = 0;
+      for (let i = 0; i < data.length; i += 1) {
+        const v = (data[i] - 128) / 128;
+        sumSquares += v * v;
+      }
+      const rms = Math.sqrt(sumSquares / data.length);
+
+      const now = Date.now();
+      const recorder = mediaRecorderRef.current;
+      const isRecordingNow = recorder?.state === 'recording';
+
+      if (!isPlayingRef.current && !isLoading) {
+        if (!isRecordingNow && rms > startThreshold) {
+          silenceSinceRef.current = null;
+          recordingStartRef.current = now;
+          chunksRef.current = [];
+          const mr = new MediaRecorder(streamRef.current!);
+          mediaRecorderRef.current = mr;
+          mr.ondataavailable = (e) => {
+            if (e.data.size > 0) chunksRef.current.push(e.data);
+          };
+          mr.onstop = async () => {
+            const start = recordingStartRef.current;
+            recordingStartRef.current = null;
+            const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+            chunksRef.current = [];
+            if (!start) return;
+            if (Date.now() - start < minRecordMs) return;
+            if (blob.size < 1024) return;
+            await sendTurn(blob);
+          };
+          mr.start();
+          setIsListening(true);
+        }
+
+        if (isRecordingNow) {
+          if (rms < stopThreshold) {
+            if (!silenceSinceRef.current) silenceSinceRef.current = now;
+            if (now - silenceSinceRef.current > silenceMsToStop) {
+              silenceSinceRef.current = null;
+              recorder?.stop();
+              setIsListening(false);
+            }
+          } else {
+            silenceSinceRef.current = null;
+          }
+        }
+      }
+
+      rafIdRef.current = requestAnimationFrame(tick);
+    };
+
+    rafIdRef.current = requestAnimationFrame(tick);
+  };
+
+  const startCall = async () => {
+    setCallStatus('connecting');
+    setMessages([]);
+    try {
+      const formData = new FormData();
+      formData.append('customer_id', customerIdRef.current);
+      const resp = await axios.post(`${API_URL}/call/start`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+
+      const { session_id, agent_response, audio_base64 } = resp.data as {
+        session_id: string;
+        agent_response: string;
+        audio_base64: string | null;
+      };
+
+      sessionIdRef.current = session_id;
+      setMessages([{ role: 'agent', text: agent_response }]);
+      await playAudioResponse(audio_base64);
+      await startVadLoop();
+      setCallStatus('in_call');
+    } catch (error) {
+      console.error(error);
+      alert('Could not start the call. Check microphone permissions and backend status.');
+      setCallStatus('idle');
+      stopLoop();
+    }
+  };
+
+  const endCall = async () => {
+    if (!sessionIdRef.current) {
+      setCallStatus('idle');
+      stopLoop();
+      return;
+    }
+    setCallStatus('ending');
+    stopLoop();
+    try {
+      const formData = new FormData();
+      formData.append('session_id', sessionIdRef.current);
+      const resp = await axios.post(`${API_URL}/call/end`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+
+      const { agent_response, audio_base64 } = resp.data as { agent_response: string; audio_base64: string | null };
+      setMessages((prev) => [...prev, { role: 'agent', text: agent_response }]);
+      await playAudioResponse(audio_base64);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      sessionIdRef.current = null;
+      setCallStatus('idle');
+    }
   };
 
   return (
     <div className="app-container">
       <header className="header">
         <h1>Bank ABC Voice Agent</h1>
-        <p>Press the microphone to start speaking</p>
+        <p>{callStatus === 'in_call' ? (isListening ? 'Listening…' : 'On call…') : 'Start a call to speak naturally'}</p>
       </header>
 
       <div className="chat-window">
@@ -137,17 +261,14 @@ function App() {
 
       <div className="controls">
         <button 
-          className={`mic-button ${isRecording ? 'recording' : ''}`}
-          onMouseDown={startRecording}
-          onMouseUp={stopRecording}
-          onTouchStart={startRecording}
-          onTouchEnd={stopRecording}
-          disabled={isLoading}
+          className={`mic-button ${callStatus === 'in_call' ? 'recording' : ''}`}
+          onClick={callStatus === 'in_call' ? endCall : startCall}
+          disabled={callStatus === 'connecting' || callStatus === 'ending'}
         >
-          {isRecording ? <MicOff size={32} /> : <Mic size={32} />}
+          {callStatus === 'in_call' ? <PhoneOff size={32} /> : <Phone size={32} />}
         </button>
         <p className="instruction">
-          {isRecording ? 'Release to Send' : 'Hold to Speak'}
+          {callStatus === 'in_call' ? 'End Call' : 'Start Call'}
         </p>
       </div>
     </div>
