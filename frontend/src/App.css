@@ -1,0 +1,142 @@
+#root {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 2rem;
+  text-align: center;
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+}
+
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 80vh;
+  width: 100%;
+  max-width: 600px;
+  margin: 0 auto;
+  background-color: #f9f9f9;
+  border-radius: 20px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+  overflow: hidden;
+}
+
+.header {
+  padding: 20px;
+  background-color: #2c3e50;
+  color: white;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.chat-window {
+  flex: 1;
+  padding: 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  background-color: #fff;
+}
+
+.empty-state {
+  color: #888;
+  margin-top: 50px;
+}
+
+.message {
+  display: flex;
+  width: 100%;
+}
+
+.message.user {
+  justify-content: flex-end;
+}
+
+.message.agent {
+  justify-content: flex-start;
+}
+
+.message-bubble {
+  max-width: 80%;
+  padding: 10px 15px;
+  border-radius: 15px;
+  text-align: left;
+  line-height: 1.4;
+}
+
+.message.user .message-bubble {
+  background-color: #3498db;
+  color: white;
+  border-bottom-right-radius: 5px;
+}
+
+.message.agent .message-bubble {
+  background-color: #ecf0f1;
+  color: #2c3e50;
+  border-bottom-left-radius: 5px;
+}
+
+.controls {
+  padding: 30px;
+  background-color: #fff;
+  border-top: 1px solid #eee;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.mic-button {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  border: none;
+  background-color: #e74c3c;
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  box-shadow: 0 4px 10px rgba(231, 76, 60, 0.3);
+}
+
+.mic-button:hover {
+  transform: scale(1.05);
+}
+
+.mic-button:active, .mic-button.recording {
+  transform: scale(0.95);
+  background-color: #c0392b;
+  box-shadow: 0 0 15px rgba(231, 76, 60, 0.6);
+}
+
+.mic-button:disabled {
+  background-color: #95a5a6;
+  cursor: not-allowed;
+}
+
+.instruction {
+  font-size: 0.9rem;
+  color: #7f8c8d;
+  font-weight: 500;
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-style: italic;
+  color: #7f8c8d;
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

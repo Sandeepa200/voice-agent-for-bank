@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-dotenv
+langchain
+langchain-groq
+langgraph
+deepgram-sdk
+httpx
+pydantic
+python-multipart

@@ -1,0 +1,78 @@
+Senior AI Engineer Assessment: The "Bank ABC" Voice Agent
+1. Objective
+Build a Full-Stack Voice Agent Platform (POC).
+This task evaluates your ability to design autonomous agents that can handle complex user intents, enforce safety guardrails, and deliver them via a working, deployed web application.
+Format: Full Stack Application (Deployed in Vercel)
+2. The Scenario
+You are building a Conversational Voice AI for Bank "ABC" that can handle real customer calls, understand the caller’s intent, and route them through the correct banking conversational flow (with safe escalation when required).
+The solution should be delivered as a quick-to-iterate micro app platform where bank teams can configure prompts, tools, and routing rules, run fast POCs for new customer requirements, and monitor calls in real time (transcripts, agent actions, tool calls).
+3. Bank ABC – Required Routing Flows
+Your agent must support routing for all 6 flows below. You must implement Deep Logic/Tools for the first two (Card & ATM Issues, Account Servicing) and simple routing stubs for the others.
+Flow Name
+Description
+1. Card & ATM Issues
+Lost/stolen card, cash not dispensed, declined payments.
+2. Account Servicing
+Statement requests, profile updates (e.g., address change).
+3. Account Opening / Onboarding
+Documents, eligibility, appointment/lead capture.
+4. Digital App Support
+Login issues, OTP problems, device change, app crash.
+5. Transfers & Bill Payments
+Failed/pending transfers, beneficiary help, bill pay issues.
+6. Account Closure / Retention
+Reason capture + save attempt + closure route.
+4. Technical Requirements
+Tech Stack
+●
+Backend: Python (FastAPI preferred).
+●
+AI Framework: LangGraph, CrewAI, or Pydantic AI.
+●
+Observability (Mandatory): Must use LangSmith or LangFuse to trace agent execution.
+●
+Frontend: React (Vite or Next.js).
+●
+Deployment: Must be accessible via a public URL.
+5. Mock Tool Specifications
+Implement these Python functions to mock the Core Banking API for the deep logic flows.
+●
+verify_identity(customer_id, pin) -> bool (Critical: Must be called before accessing data).
+●
+get_recent_transactions(customer_id, count) -> List[Dict].
+●
+block_card(card_id, reason) -> str (Irreversible action).
+●
+get_account_balance(customer_id) -> Dict.
+6. Deliverables
+●
+Public git repository (GitHub) or ZIP.
+●
+README with setup instructions and trade-offs.
+●
+Working backend and frontend.
+●
+Deployed POC that can be shared for review (must include):
+○
+Live URL for the frontend micro app.
+○
+Live API base URL (or hosted gateway).
+○
+Test credentials (seeded user login).
+○
+Any required environment notes (rate limits, webhook URL, etc.).
+●
+Demo access instructions (how to run a test call / simulation end-to-end).
+●
+Trace Evidence: A public link or screenshot from LangSmith/LangFuse showing the full execution trace of a "Lost Card" or "Balance Check" scenario.
+7. Evaluation Criteria
+We will evaluate:
+●
+Guardrails: Does the agent strictly enforce identity verification before reading
+balances?
+●
+Orchestration: Can the agent distinguish between "My card is declined" (Card Issue) and "I can't login" (Digital Support)?
+●
+Observability: Are the traces in LangSmith/LangFuse clear and labelled?
+●
+Full Stack Polish: Is the deployed POC stable and responsive?
