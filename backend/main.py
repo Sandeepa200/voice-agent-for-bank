@@ -14,13 +14,9 @@ import base64
 import uuid
 
 # Import our modules
-# Use relative imports if running as package, or absolute if running script
-try:
-    from backend.app.agent import app as agent_app
-    from backend.app.utils import transcribe_audio, synthesize_audio
-except ImportError:
-    from app.agent import app as agent_app
-    from app.utils import transcribe_audio, synthesize_audio
+from app.agent import app as agent_app
+from app.utils import transcribe_audio, synthesize_audio
+    
 
 app = FastAPI(title="Bank ABC Voice Agent")
 
