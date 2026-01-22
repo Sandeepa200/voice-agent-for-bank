@@ -12,7 +12,8 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage
-from backend.app.tools import verify_identity, get_account_balance, get_recent_transactions, block_card
+from app.tools import verify_identity, get_account_balance, get_recent_transactions, block_card
+
 
 # --- 1. Define State ---
 class AgentState(TypedDict):
