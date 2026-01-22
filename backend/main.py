@@ -58,6 +58,13 @@ async def chat_endpoint(
         # We'll read it into memory since we need to send it to Groq anyway.
         audio_content = await audio.read()
         
+        # Check for empty or extremely short files
+        if len(audio_content) < 1024: # Less than 1KB is likely invalid or empty
+             return JSONResponse(
+                content={"error": "Audio recording too short. Please speak longer."}, 
+                status_code=400
+            )
+
         if len(audio_content) > MAX_FILE_SIZE:
              raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -68,7 +75,7 @@ async def chat_endpoint(
         user_text = await transcribe_audio(audio_content)
         if not user_text:
             return JSONResponse(
-                content={"error": "Could not transcribe audio. Please try again."}, 
+                content={"error": "Could not transcribe audio. Please speak clearly and ensure the recording is long enough."}, 
                 status_code=400
             )
         

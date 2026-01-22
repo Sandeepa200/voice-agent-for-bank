@@ -33,6 +33,14 @@ function App() {
 
       mediaRecorder.onstop = async () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        
+        // Check if audio is too short (approx < 1KB)
+        if (audioBlob.size < 1024) {
+          console.warn("Audio recording too short, skipping upload.");
+          // Optional: Alert user, but console warning is less intrusive if it was an accidental click
+          return;
+        }
+
         await sendAudioToBackend(audioBlob);
       };
 
