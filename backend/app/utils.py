@@ -16,7 +16,7 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
         # We pass a tuple to simulate a file upload
         transcription = groq_client.audio.transcriptions.create(
             file=("audio.webm", audio_bytes), 
-            model="distil-whisper-large-v3-en",
+            model="whisper-large-v3",
             response_format="json",
             language="en",
             temperature=0.0
