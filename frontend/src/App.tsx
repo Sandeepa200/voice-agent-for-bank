@@ -19,6 +19,7 @@ function App() {
 
   const sessionIdRef = useRef<string | null>(null);
   const customerIdRef = useRef<string>('user_123');
+  const callActiveRef = useRef(false);
 
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -29,8 +30,29 @@ function App() {
   const isPlayingRef = useRef(false);
   const silenceSinceRef = useRef<number | null>(null);
   const recordingStartRef = useRef<number | null>(null);
+  const resumeAtRef = useRef<number>(0);
 
   const stopLoop = () => {
+    if (rafIdRef.current) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => undefined);
+      audioContextRef.current = null;
+    }
+    analyserRef.current = null;
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    setIsListening(false);
+  };
+
+  const pauseCapture = () => {
     if (rafIdRef.current) {
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
@@ -56,9 +78,17 @@ function App() {
     };
   }, []);
 
+  const resumeCapture = async () => {
+    if (!callActiveRef.current) return;
+    if (rafIdRef.current) return;
+    resumeAtRef.current = Date.now() + 600;
+    await startVadLoop();
+  };
+
   const playAudioResponse = async (base64Audio: string | null) => {
     if (!base64Audio) return;
     isPlayingRef.current = true;
+    pauseCapture();
     try {
       const audio = new Audio(`data:audio/mp3;base64,${base64Audio}`);
       await new Promise<void>((resolve) => {
@@ -69,6 +99,7 @@ function App() {
     } finally {
       isPlayingRef.current = false;
     }
+    await resumeCapture();
   };
 
   const sendTurn = async (audioBlob: Blob) => {
@@ -98,7 +129,13 @@ function App() {
   };
 
   const startVadLoop = async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
     streamRef.current = stream;
 
     const audioContext = new AudioContext();
@@ -131,7 +168,7 @@ function App() {
       const recorder = mediaRecorderRef.current;
       const isRecordingNow = recorder?.state === 'recording';
 
-      if (!isPlayingRef.current && !isLoading) {
+      if (!isPlayingRef.current && !isLoading && now >= resumeAtRef.current) {
         if (!isRecordingNow && rms > startThreshold) {
           silenceSinceRef.current = null;
           recordingStartRef.current = now;
@@ -192,14 +229,15 @@ function App() {
       };
 
       sessionIdRef.current = session_id;
+      callActiveRef.current = true;
       setMessages([{ role: 'agent', text: agent_response }]);
       await playAudioResponse(audio_base64);
-      await startVadLoop();
       setCallStatus('in_call');
     } catch (error) {
       console.error(error);
       alert('Could not start the call. Check microphone permissions and backend status.');
       setCallStatus('idle');
+      callActiveRef.current = false;
       stopLoop();
     }
   };
@@ -207,10 +245,12 @@ function App() {
   const endCall = async () => {
     if (!sessionIdRef.current) {
       setCallStatus('idle');
+      callActiveRef.current = false;
       stopLoop();
       return;
     }
     setCallStatus('ending');
+    callActiveRef.current = false;
     stopLoop();
     try {
       const formData = new FormData();

@@ -5,6 +5,7 @@ import base64
 import time
 import uuid
 from typing import Optional
+import re
 
 # Load env vars BEFORE importing other modules
 # Explicitly point to the .env file in the backend directory
@@ -73,6 +74,11 @@ def _encode_audio(audio_bytes: Optional[bytes]) -> Optional[str]:
         return None
     return base64.b64encode(audio_bytes).decode("utf-8")
 
+def _sanitize_agent_text(text: str) -> str:
+    cleaned = re.sub(r"<function=[^>]+>\{.*?\}", "", text)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip()
+
 
 @app.post("/call/start")
 async def start_call(customer_id: str = Form("user_123")):
@@ -138,7 +144,7 @@ async def call_turn(
             },
         )
 
-        bot_response = result["messages"][-1].content
+        bot_response = _sanitize_agent_text(result["messages"][-1].content or "")
         tool_calls = getattr(result["messages"][-1], "tool_calls", None) or []
 
         session["messages"] = result["messages"]
@@ -214,6 +220,7 @@ async def write_config(payload: AgentConfigUpdate):
 @app.post("/chat")
 async def chat_endpoint(audio: UploadFile = File(...), customer_id: str = Form("user_123")):
     session_id = _new_session(customer_id)
+    return {"session_id": session_id, **(await call_turn(audio=audio, session_id=session_id, customer_id=customer_id))}
 
 if __name__ == "__main__":
     import uvicorn
