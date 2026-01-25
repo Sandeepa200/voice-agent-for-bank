@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { Phone, PhoneOff, Loader2, Shield, ArrowLeft, Save } from 'lucide-react';
+import { Phone, PhoneOff, Loader2, Shield, ArrowLeft, Save, CheckCircle2 } from 'lucide-react';
 import './App.css';
 
 interface Message {
@@ -36,9 +36,10 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [callStatus, setCallStatus] = useState<'idle' | 'connecting' | 'in_call' | 'ending'>('idle');
+  const [callStatus, setCallStatus] = useState<'idle' | 'connecting' | 'active' | 'ending'>('idle');
   const [isListening, setIsListening] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isVerified, setIsVerified] = useState<boolean>(false);
   const [view, setView] = useState<'call' | 'admin'>('call');
 
   const [adminLoading, setAdminLoading] = useState(false);
@@ -296,11 +297,16 @@ function App() {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
 
-      const { user_transcript, agent_response, audio_base64 } = response.data as {
+      const { user_transcript, agent_response, audio_base64, is_verified } = response.data as {
         user_transcript: string;
         agent_response: string;
         audio_base64: string | null;
+        is_verified?: boolean;
       };
+      
+      if (typeof is_verified === 'boolean') {
+        setIsVerified(is_verified);
+      }
 
       setMessages((prev) => {
         const next = [...prev];
@@ -342,18 +348,20 @@ function App() {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
 
-      const { session_id, agent_response, audio_base64 } = resp.data as {
+      const { session_id, agent_response, audio_base64, is_verified } = resp.data as {
         session_id: string;
         agent_response: string;
         audio_base64: string | null;
+        is_verified?: boolean;
       };
 
       sessionIdRef.current = session_id;
       callActiveRef.current = true;
+      setCallStatus('active');
+      setIsVerified(!!is_verified);
       setMessages([{ role: 'agent', text: agent_response }]);
       await playAudioResponse(audio_base64);
       await startCapture();
-      setCallStatus('in_call');
     } catch (error) {
       console.error(error);
       const msg = formatStartCallError(error);
@@ -494,9 +502,22 @@ function App() {
         <div className="header-row">
           <div className="header-title">
             <h1>Bank ABC Voice Agent</h1>
-            <p>{view === 'admin' ? 'Admin dashboard' : callStatus === 'in_call' ? (isListening ? 'Listening…' : 'On call…') : 'Start a call to speak naturally'}</p>
+            <p>
+              {view === 'admin'
+                ? 'Admin dashboard'
+                : callStatus === 'active'
+                ? isListening
+                  ? 'Listening…'
+                  : 'On call…'
+                : 'Start a call to speak naturally'}
+            </p>
           </div>
           <div className="header-actions">
+            {callStatus === 'active' && isVerified && (
+              <span className="verified-badge">
+                <CheckCircle2 size={16} /> Verified
+              </span>
+            )}
             {view === 'call' ? (
               <button className="header-button" onClick={() => void openAdmin()} disabled={callStatus !== 'idle'}>
                 <Shield size={16} /> Admin
@@ -537,13 +558,13 @@ function App() {
 
           <div className="controls">
             <button
-              className={`mic-button ${callStatus === 'in_call' ? 'recording' : ''}`}
-              onClick={callStatus === 'in_call' ? endCall : startCall}
-              disabled={callStatus === 'connecting' || callStatus === 'ending'}
+              className={`mic-button ${callStatus === 'active' ? 'recording' : ''}`}
+              onClick={callStatus === 'active' ? endCall : startCall}
+              disabled={callStatus === 'connecting'}
             >
-              {callStatus === 'in_call' ? <PhoneOff size={32} /> : <Phone size={32} />}
+              {callStatus === 'active' ? <PhoneOff size={32} /> : <Phone size={32} />}
             </button>
-            <p className="instruction">{callStatus === 'in_call' ? 'End Call' : 'Start Call'}</p>
+            <p className="instruction">{callStatus === 'active' ? 'End Call' : 'Start Call'}</p>
           </div>
         </>
       ) : (

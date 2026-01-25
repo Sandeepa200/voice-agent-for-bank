@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 # Import our modules
 from app.agent import app as agent_app
 from app.utils import transcribe_audio, synthesize_audio
-from app.tools import reset_verification, set_tool_flags, verify_identity_raw
+from app.tools import reset_verification, set_tool_flags, verify_identity_raw, set_verification_state
 from app.agent import get_agent_config, update_agent_config
 from app.db import init_db
 from app.session_repo import (
@@ -169,6 +169,15 @@ def _extract_verify_success(tool_calls: list, messages: list) -> tuple[Optional[
                 cid = args.get("customer_id")
                 if isinstance(cid, str) and cid.strip():
                     verified_customer_id = cid.strip()
+            if not verified_customer_id:
+                for c in reversed(tool_calls or []):
+                    if not isinstance(c, dict) or c.get("name") != "verify_identity":
+                        continue
+                    args = c.get("args") if isinstance(c.get("args"), dict) else {}
+                    cid = args.get("customer_id")
+                    if isinstance(cid, str) and cid.strip():
+                        verified_customer_id = cid.strip()
+                        break
             break
     return verified_customer_id, attempts, verified
 
@@ -227,6 +236,21 @@ def _apply_sensitive_guardrail(*, agent_text: str, messages: list, customer_id: 
     return text
 
 
+def _is_rate_limited_error(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "error code: 429" in s or "rate_limit_exceeded" in s or "rate limit reached" in s
+
+
+def _extract_retry_after_seconds(exc: Exception) -> Optional[int]:
+    s = str(exc)
+    m = re.search(r"try again in\s+(\d+)m([\d.]+)s", s, flags=re.IGNORECASE)
+    if not m:
+        return None
+    minutes = int(m.group(1))
+    seconds = float(m.group(2))
+    return int(max(0, minutes * 60 + seconds))
+
+
 @app.post("/call/start")
 async def start_call(env_key: str = Form("dev")):
     customer_id = "guest"
@@ -239,7 +263,7 @@ async def start_call(env_key: str = Form("dev")):
     if USE_DB:
         await set_verification(session_id, verified_identity=False, verification_attempts=0)
         await append_turn(session_id=session_id, ts=time.time(), user_transcript=None, agent_response=greeting, tool_calls=[])
-    return {"session_id": session_id, "agent_response": greeting, "audio_base64": _encode_audio(audio_bytes)}
+    return {"session_id": session_id, "agent_response": greeting, "audio_base64": _encode_audio(audio_bytes), "is_verified": False}
 
 
 @app.post("/call/end")
@@ -260,7 +284,7 @@ async def end_call(session_id: str = Form(...)):
     audio_bytes = await synthesize_audio(closing)
     if USE_DB:
         await append_turn(session_id=session_id, ts=time.time(), user_transcript=None, agent_response=closing, tool_calls=[])
-    return {"agent_response": closing, "audio_base64": _encode_audio(audio_bytes)}
+    return {"agent_response": closing, "audio_base64": _encode_audio(audio_bytes), "is_verified": False}
 
 
 @app.post("/call/turn")
@@ -278,6 +302,11 @@ async def call_turn(
         session = SESSIONS.get(session_id)
         if not session or session.get("ended"):
             raise HTTPException(status_code=404, detail="Session not found or ended")
+            
+    # Hydrate in-memory verification cache from persistent session state
+    current_customer_id = session.get("customer_id") or "guest"
+    is_verified_session = bool(session.get("verified_identity"))
+    set_verification_state(current_customer_id, is_verified_session)
 
     try:
         audio_content = await audio.read()
@@ -313,14 +342,23 @@ async def call_turn(
 
         current_customer_id = session.get("customer_id") or "guest"
         inputs = {"messages": messages, "customer_id": current_customer_id, "flow": None}
-        result = agent_app.invoke(
-            inputs,
-            config={
-                "run_name": f"bank-abc-call-turn:{session_id}",
-                "metadata": {"session_id": session_id, "customer_id": current_customer_id},
-                "tags": ["bank-abc", "voice-agent"],
-            },
-        )
+        try:
+            result = agent_app.invoke(
+                inputs,
+                config={
+                    "run_name": f"bank-abc-call-turn:{session_id}",
+                    "metadata": {"session_id": session_id, "customer_id": current_customer_id},
+                    "tags": ["bank-abc", "voice-agent"],
+                },
+            )
+        except Exception as e:
+            if _is_rate_limited_error(e):
+                retry_after = _extract_retry_after_seconds(e)
+                headers = {}
+                if retry_after is not None:
+                    headers["Retry-After"] = str(retry_after)
+                raise HTTPException(status_code=429, detail="LLM rate limit reached. Please try again shortly.", headers=headers)
+            raise
 
         bot_response = _sanitize_agent_text(result["messages"][-1].content or "")
         all_tool_calls = []
@@ -358,9 +396,16 @@ async def call_turn(
                 }
             )
 
+        # Determine final verification state to return to UI
+        final_is_verified = verified_now or is_verified_session
+        
         audio_bytes = await synthesize_audio(bot_response)
-        return {"user_transcript": user_text, "agent_response": bot_response, "audio_base64": _encode_audio(audio_bytes)}
-
+        return {
+            "user_transcript": user_text, 
+            "agent_response": bot_response, 
+            "audio_base64": _encode_audio(audio_bytes),
+            "is_verified": final_is_verified
+        }
     except HTTPException as he:
         raise he
     except Exception as e:

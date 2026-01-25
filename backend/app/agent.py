@@ -43,12 +43,43 @@ class AgentState(TypedDict):
     flow: Optional[FlowName]
 
 # --- 2. Setup LLM & Tools ---
-# Using Groq's Llama-3.3-70b-versatile for high intelligence
-llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=os.environ.get("GROQ_API_KEY"),
-    temperature=0
+_DEFAULT_PRIMARY_MODEL = os.environ.get("GROQ_CHAT_MODEL") or os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile"
+_DEFAULT_FALLBACKS = ",".join(
+    [
+        _DEFAULT_PRIMARY_MODEL,
+        "llama-3.1-8b-instant",
+        "llama-3.1-70b-versatile",
+        "gemma2-9b-it",
+        "mixtral-8x7b-32768",
+    ]
 )
+_MODEL_CANDIDATES = [
+    m.strip()
+    for m in (os.environ.get("GROQ_MODEL_FALLBACKS") or _DEFAULT_FALLBACKS).split(",")
+    if m.strip()
+]
+
+_LLM_CACHE: dict[str, ChatGroq] = {}
+_LLM_WITH_TOOLS_CACHE: dict[str, object] = {}
+_ACTIVE_MODEL: str = _MODEL_CANDIDATES[0] if _MODEL_CANDIDATES else _DEFAULT_PRIMARY_MODEL
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "error code: 429" in s or "rate_limit_exceeded" in s or "rate limit reached" in s
+
+
+def _get_llm(model: str) -> ChatGroq:
+    cached = _LLM_CACHE.get(model)
+    if cached is not None:
+        return cached
+    created = ChatGroq(
+        model=model,
+        api_key=os.environ.get("GROQ_API_KEY"),
+        temperature=0,
+    )
+    _LLM_CACHE[model] = created
+    return created
 
 # Bind tools to the LLM
 tools = [
@@ -63,28 +94,59 @@ tools = [
     update_address,
     report_cash_not_dispensed,
 ]
-llm_with_tools = llm.bind_tools(tools)
+
+
+def _get_llm_with_tools(model: str):
+    cached = _LLM_WITH_TOOLS_CACHE.get(model)
+    if cached is not None:
+        return cached
+    bound = _get_llm(model).bind_tools(tools)
+    _LLM_WITH_TOOLS_CACHE[model] = bound
+    return bound
+
+
+def _invoke_llm_with_fallback(*, system_prompt: str, messages: list, with_tools: bool):
+    global _ACTIVE_MODEL
+    ordered = [_ACTIVE_MODEL] + [m for m in _MODEL_CANDIDATES if m != _ACTIVE_MODEL]
+    last_exc: Optional[Exception] = None
+    for model in ordered:
+        try:
+            if with_tools:
+                llm_obj = _get_llm_with_tools(model)
+            else:
+                llm_obj = _get_llm(model)
+            resp = llm_obj.invoke([SystemMessage(content=system_prompt)] + messages)
+            _ACTIVE_MODEL = model
+            return resp
+        except Exception as e:
+            last_exc = e
+            if _is_rate_limited(e):
+                continue
+            continue
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("No model candidates available")
+
+# --- 3. System Prompt ---
 
 # --- 3. System Prompt ---
 BASE_SYSTEM_PROMPT = """You are the AI Voice Agent for Bank ABC. 
 Your goal is to assist customers with banking queries efficiently and securely.
 
-CONVERSATION:
-1. If the user is greeting, thanking you, or making small talk without a banking request, respond naturally and ask how you can help today.
-2. Do NOT ask for Customer ID or PIN until the user asks for something that requires account access.
-3. If there is no clear banking request yet, ask a single open question to find out what they need.
+CONVERSATION & STYLE:
+- If the user is greeting, thanking you, or making small talk without a banking request, respond naturally and ask what you can help with.
+- Do not ask for Customer ID or PIN until the user asks for something that requires account access. [Very Important]
+- Keep replies short and conversational (max 2 sentences). Ask one question at a time.
+- If the request is unclear, ask one clarifying question instead of guessing.
 
-SECURITY & VERIFICATION PROTOCOL:
-1. The caller may NOT be verified yet. Current known customer_id (may be "guest"): {customer_id}
-2. Only ask for Customer ID + PIN when the user's request requires verification (balance, transactions, cards, statements, profile updates, disputes, blocking cards).
-3. You MUST call `verify_identity(customer_id, pin)` BEFORE calling any of these tools: `get_account_balance`, `get_customer_profile`, `get_recent_transactions`, `get_customer_cards`, `request_statement`, `update_address`, `report_cash_not_dispensed`, `block_card`.
-4. If customer_id is unknown/guest, ask for the Customer ID first. Then ask for the PIN (4-6 digits). After you have both, call `verify_identity`.
-5. If the user provides a 4-6 digit number but you don't have a customer_id yet, ask for the Customer ID instead of calling `verify_identity` with "guest".
-6. NEVER reveal balances, transactions, statements, or profile details unless the tools return success (no error).
-7. Card blocking is irreversible: confirm reason AND get explicit confirmation before you call `block_card`.
-8. NEVER show tool call syntax in your reply. Do not write tool markup like `<function=...>` or JSON arguments. If you need missing info, ask the user instead.
-9. If you know the customer_id, call `get_verification_status(customer_id)` before asking for the PIN. If it returns verified=true, do not ask for the PIN again for this call.
-10. Do not repeatedly ask for PIN in a loop. If verification failed, ask the user to try again once.
+
+SECURITY & VERIFICATION PROTOCOL (CRITICAL):
+- Current customer_id: {customer_id}
+- If customer_id is not \"guest\", call `get_verification_status(customer_id)` before asking for a PIN.
+- Before using any sensitive tool, you must be verified. If not verified: ask for Customer ID (if missing), then ask for PIN (4–6 digits), then call `verify_identity(customer_id, pin)`.
+- Never use these tools unless verification succeeded: `get_account_balance`, `get_customer_profile`, `get_recent_transactions`, `get_customer_cards`, `request_statement`, `update_address`, `report_cash_not_dispensed`, `block_card`.
+- Never reveal tool syntax. If verification fails, allow one retry, otherwise offer to connect them to a specialist.
+- Card blocking is irreversible: confirm the reason and get explicit confirmation before calling `block_card`.
 
 ROUTING:
 - You MUST pick exactly one flow label for the user's latest request:
@@ -96,22 +158,11 @@ ROUTING:
   - account_closure_retention (stub)
 - Current flow: {flow}
 
-STYLE:
-- Keep responses SHORT and CONVERSATIONAL (max 2 sentences). This is a voice call.
-- Ask for ONE missing detail at a time.
-- If the user's request is ambiguous (e.g., \"tell me about the data\"), ask a clarifying question instead of guessing.
+FLOW PLAYBOOKS (KEEP IT BRIEF):
+- card_atm_issues: After verification, ask for the minimum details needed, then use the right tool (`get_recent_transactions`, `report_cash_not_dispensed`, `get_customer_cards` + `block_card`). For `block_card`, always confirm it’s permanent before acting.
+- account_servicing: After verification, use `get_account_balance` / `get_recent_transactions` / `request_statement` / `update_address` / `get_customer_profile` as needed. Ask for one missing input (like statement month or new address) before calling the tool.
+- other flows: Give brief guidance and offer to connect them to a specialist.
 
-FLOW HANDLING:
-- card_atm_issues:
-  - Lost/stolen: ask reason and explicit confirmation; after verification, if no card_id, call `get_customer_cards` then call `block_card(card_id, reason)`.
-  - Declined payment: ask for merchant or transaction id; after verification, you may call `get_recent_transactions`.
-  - Cash not dispensed: ask for ATM id, amount, and date; after verification, call `report_cash_not_dispensed`.
-- account_servicing:
-  - Balance check: after verification, call `get_account_balance`.
-  - Profile details: after verification, call `get_customer_profile`.
-  - Statement request: ask for statement period (YYYY-MM); after verification, call `request_statement`.
-  - Address change: ask for new address; after verification, call `update_address`.
-- other flows (stubs): give brief POC guidance and offer to capture a callback number.
 """
 
 ROUTER_PROMPT = """Classify the user's latest request into exactly one flow label from:
@@ -147,7 +198,16 @@ def router(state: AgentState):
             last_user_text = m[1]
             break
 
-    resp = llm.invoke([SystemMessage(content=AGENT_CONFIG["router_prompt"]), HumanMessage(content=last_user_text or "")])
+    router_prompt = AGENT_CONFIG["router_prompt"]
+    try:
+        router_prompt = router_prompt.format(last_user_message=last_user_text or "")
+    except Exception:
+        pass
+    resp = _invoke_llm_with_fallback(
+        system_prompt=router_prompt,
+        messages=[HumanMessage(content=last_user_text or "")],
+        with_tools=False,
+    )
     label = (resp.content or "").strip()
     allowed = {
         "card_atm_issues",
@@ -167,7 +227,7 @@ def chatbot(state: AgentState):
         flow=state.get("flow") or "account_servicing",
     )
     
-    response = llm_with_tools.invoke([SystemMessage(content=current_prompt)] + state["messages"])
+    response = _invoke_llm_with_fallback(system_prompt=current_prompt, messages=state["messages"], with_tools=True)
     return {"messages": [response]}
 
 # --- 5. Build Graph ---
