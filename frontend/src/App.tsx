@@ -516,7 +516,7 @@ function App() {
           <div className="chat-window">
             {messages.length === 0 && (
               <div className="empty-state">
-                <p>No conversation yet. Say "Hello" or "Check my balance".</p>
+                <p>No conversation yet. Click call button below to start a call".</p>
               </div>
             )}
             {messages.map((msg, idx) => (
