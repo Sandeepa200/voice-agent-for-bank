@@ -71,7 +71,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Bank ABC Voice Agent", lifespan=lifespan, root_path=os.environ.get("ROOT_PATH", ""))
+app = FastAPI(title="Bank ABC Voice Agent", lifespan=lifespan, root_path=os.environ.get("VITE_API_URL", "/api"))
 
 
 
