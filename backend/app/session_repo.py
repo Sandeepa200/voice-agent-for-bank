@@ -42,6 +42,14 @@ async def set_verification(session_id: str, *, verified_identity: bool, verifica
     )
 
 
+async def set_customer_id(session_id: str, *, customer_id: str) -> None:
+    db = get_db()
+    await db["call_sessions"].update_one(
+        {"session_id": session_id},
+        {"$set": {"customer_id": str(customer_id), "updated_at": time.time()}},
+    )
+
+
 async def append_turn(
     *,
     session_id: str,

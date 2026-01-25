@@ -48,14 +48,8 @@ function App() {
   const [routerPrompt, setRouterPrompt] = useState('');
   const [toolFlags, setToolFlags] = useState<ToolFlags>({});
   const [routingRulesText, setRoutingRulesText] = useState('{}');
-  const [authOpen, setAuthOpen] = useState(false);
-  const [authCustomerId, setAuthCustomerId] = useState('user_123');
-  const [authPin, setAuthPin] = useState('');
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [authSubmitting, setAuthSubmitting] = useState(false);
 
   const sessionIdRef = useRef<string | null>(null);
-  const customerIdRef = useRef<string>('user_123');
   const callActiveRef = useRef(false);
 
   const isPlayingRef = useRef(false);
@@ -295,7 +289,6 @@ function App() {
       const formData = new FormData();
       formData.append('audio', audioBlob, 'utterance.wav');
       formData.append('session_id', sessionIdRef.current);
-      formData.append('customer_id', customerIdRef.current);
 
       const response = await axios.post(`${API_URL}/call/turn`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -316,31 +309,11 @@ function App() {
   };
 
   const startCall = async () => {
-    setAuthCustomerId(customerIdRef.current);
-    setAuthPin('');
-    setAuthError(null);
-    setAuthOpen(true);
-  };
-
-  const startCallWithAuth = async () => {
-    const cust = authCustomerId.trim();
-    const pin = authPin.trim();
-    if (!/^\d+$/.test(cust)) {
-      setAuthError('Customer ID must be digits only.');
-      return;
-    }
-    if (!/^\d+$/.test(pin) || pin.length < 4 || pin.length > 6) {
-      setAuthError('PIN must be 4 to 6 digits.');
-      return;
-    }
-    setAuthSubmitting(true);
     setCallStatus('connecting');
     setMessages([]);
     setErrorMessage(null);
     try {
       const formData = new FormData();
-      formData.append('customer_id', cust);
-      formData.append('pin', pin);
       const resp = await axios.post(`${API_URL}/call/start`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
@@ -351,26 +324,19 @@ function App() {
         audio_base64: string | null;
       };
 
-      customerIdRef.current = cust;
       sessionIdRef.current = session_id;
       callActiveRef.current = true;
       setMessages([{ role: 'agent', text: agent_response }]);
       await playAudioResponse(audio_base64);
-      setAuthOpen(false);
-      setAuthPin('');
-      setAuthError(null);
       await startCapture();
       setCallStatus('in_call');
     } catch (error) {
       console.error(error);
       const msg = formatStartCallError(error);
-      setAuthError(msg);
       setErrorMessage(msg);
       setCallStatus('idle');
       callActiveRef.current = false;
       void stopCapture();
-    } finally {
-      setAuthSubmitting(false);
     }
   };
 
@@ -600,28 +566,6 @@ function App() {
               </button>
             </div>
             <textarea className="admin-textarea" value={routingRulesText} onChange={(e) => setRoutingRulesText(e.target.value)} />
-          </div>
-        </div>
-      )}
-
-      {authOpen && view === 'call' && (
-        <div className="modal-overlay">
-          <div className="modal">
-            <h2>Verify Identity</h2>
-            <p className="modal-subtitle">Enter Customer ID and PIN before starting the call.</p>
-            <label className="modal-label">Customer ID</label>
-            <input className="modal-input" value={authCustomerId} onChange={(e) => setAuthCustomerId(e.target.value)} inputMode="numeric" />
-            <label className="modal-label">PIN (4–6 digits)</label>
-            <input className="modal-input" value={authPin} onChange={(e) => setAuthPin(e.target.value)} inputMode="numeric" type="password" />
-            {authError && <div className="modal-error">{authError}</div>}
-            <div className="modal-actions">
-              <button className="modal-button secondary" onClick={() => setAuthOpen(false)} disabled={authSubmitting}>
-                Cancel
-              </button>
-              <button className="modal-button primary" onClick={() => void startCallWithAuth()} disabled={authSubmitting}>
-                {authSubmitting ? 'Verifying…' : 'Start Call'}
-              </button>
-            </div>
           </div>
         </div>
       )}

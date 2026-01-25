@@ -32,6 +32,7 @@ from app.session_repo import (
     create_session as mongo_create_session,
     get_session as mongo_get_session,
     set_verification as mongo_set_verification,
+    set_customer_id as mongo_set_customer_id,
     get_turns as mongo_get_turns,
     list_sessions as mongo_list_sessions,
     touch_session as mongo_touch_session,
@@ -95,6 +96,8 @@ def _new_session(customer_id: str) -> str:
         "messages": [],
         "turns": [],
         "ended": False,
+        "verified_identity": False,
+        "verification_attempts": 0,
     }
     return session_id
 
@@ -115,25 +118,62 @@ def _sanitize_agent_text(text: str) -> str:
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     return cleaned.strip()
 
+def _sanitize_tool_calls(tool_calls: list) -> list:
+    sanitized = []
+    for c in tool_calls or []:
+        if not isinstance(c, dict):
+            continue
+        out = dict(c)
+        name = out.get("name")
+        args = out.get("args")
+        if isinstance(args, dict) and name == "verify_identity":
+            redacted = dict(args)
+            if "pin" in redacted:
+                redacted["pin"] = "***"
+            out["args"] = redacted
+        sanitized.append(out)
+    return sanitized
+
+def _extract_verify_success(tool_calls: list, messages: list) -> tuple[Optional[str], int, bool]:
+    calls_by_id: dict[str, dict] = {}
+    attempts = 0
+    for c in tool_calls or []:
+        if isinstance(c, dict) and c.get("name") == "verify_identity":
+            attempts += 1
+            if isinstance(c.get("id"), str):
+                calls_by_id[c["id"]] = c
+
+    verified_customer_id: Optional[str] = None
+    verified = False
+    for m in messages or []:
+        if getattr(m, "type", None) != "tool":
+            continue
+        if getattr(m, "name", None) != "verify_identity":
+            continue
+        content = (getattr(m, "content", "") or "").strip().lower()
+        ok = content in {"true", "1", "yes"}
+        tool_call_id = getattr(m, "tool_call_id", None)
+        if ok:
+            verified = True
+            if isinstance(tool_call_id, str):
+                call = calls_by_id.get(tool_call_id) or {}
+                args = call.get("args") if isinstance(call.get("args"), dict) else {}
+                cid = args.get("customer_id")
+                if isinstance(cid, str) and cid.strip():
+                    verified_customer_id = cid.strip()
+            break
+    return verified_customer_id, attempts, verified
+
 
 @app.post("/call/start")
-async def start_call(customer_id: str = Form("user_123"), env_key: str = Form("dev"), pin: Optional[str] = Form(None)):
+async def start_call(env_key: str = Form("dev")):
+    customer_id = "guest"
     session_id = await _new_session_mongo(customer_id, env_key) if USE_MONGO else _new_session(customer_id)
-    verified = False
-    attempts = 0
-    if pin is not None and str(pin).strip() != "":
-        attempts = 1
-        verified = verify_identity_raw(customer_id, str(pin).strip())
-        if not verified:
-            if USE_MONGO:
-                await mongo_set_verification(session_id, verified_identity=False, verification_attempts=attempts)
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="verify_identity_failed")
-    else:
-        reset_verification(customer_id)
+    reset_verification(customer_id)
     greeting = "Hello, welcome to Bank ABC. How can I help you today?"
     audio_bytes = await synthesize_audio(greeting)
     if USE_MONGO:
-        await mongo_set_verification(session_id, verified_identity=verified, verification_attempts=attempts)
+        await mongo_set_verification(session_id, verified_identity=False, verification_attempts=0)
         await mongo_append_turn(session_id=session_id, ts=time.time(), user_transcript=None, agent_response=greeting, tool_calls=[])
     return {"session_id": session_id, "agent_response": greeting, "audio_base64": _encode_audio(audio_bytes)}
 
@@ -163,21 +203,15 @@ async def end_call(session_id: str = Form(...)):
 async def call_turn(
     audio: UploadFile = File(...),
     session_id: str = Form(...),
-    customer_id: str = Form("user_123"),
-    env_key: str = Form("dev"),
 ):
     if USE_MONGO:
         session = await mongo_get_session(session_id)
         if not session or session.get("ended"):
             raise HTTPException(status_code=404, detail="Session not found or ended")
-        if session["customer_id"] != customer_id:
-            raise HTTPException(status_code=400, detail="customer_id does not match session")
     else:
         session = SESSIONS.get(session_id)
         if not session or session.get("ended"):
             raise HTTPException(status_code=404, detail="Session not found or ended")
-        if session["customer_id"] != customer_id:
-            raise HTTPException(status_code=400, detail="customer_id does not match session")
 
     try:
         audio_content = await audio.read()
@@ -211,25 +245,43 @@ async def call_turn(
             session["messages"].append(HumanMessage(content=user_text))
             messages = session["messages"]
 
-        inputs = {"messages": messages, "customer_id": customer_id, "flow": None}
+        current_customer_id = session.get("customer_id") or "guest"
+        inputs = {"messages": messages, "customer_id": current_customer_id, "flow": None}
         result = agent_app.invoke(
             inputs,
             config={
                 "run_name": f"bank-abc-call-turn:{session_id}",
-                "metadata": {"session_id": session_id, "customer_id": customer_id},
+                "metadata": {"session_id": session_id, "customer_id": current_customer_id},
                 "tags": ["bank-abc", "voice-agent"],
             },
         )
 
         bot_response = _sanitize_agent_text(result["messages"][-1].content or "")
-        tool_calls = getattr(result["messages"][-1], "tool_calls", None) or []
+        all_tool_calls = []
+        for m in result.get("messages") or []:
+            tcs = getattr(m, "tool_calls", None) or []
+            if isinstance(tcs, list) and tcs:
+                all_tool_calls.extend(tcs)
+        verified_customer_id, attempts_delta, verified_now = _extract_verify_success(all_tool_calls, result.get("messages") or [])
+        tool_calls = _sanitize_tool_calls(all_tool_calls)
 
         now = time.time()
         if USE_MONGO:
             await mongo_append_turn(session_id=session_id, ts=now, user_transcript=user_text, agent_response=bot_response, tool_calls=tool_calls)
+            if attempts_delta or verified_now:
+                next_attempts = int(session.get("verification_attempts") or 0) + int(attempts_delta)
+                await mongo_set_verification(session_id, verified_identity=bool(verified_now or session.get("verified_identity")), verification_attempts=next_attempts)
+            if verified_now and verified_customer_id:
+                await mongo_set_customer_id(session_id, customer_id=verified_customer_id)
         else:
             session["messages"] = result["messages"]
             session["updated_at"] = now
+            if attempts_delta:
+                session["verification_attempts"] = int(session.get("verification_attempts") or 0) + int(attempts_delta)
+            if verified_now:
+                session["verified_identity"] = True
+            if verified_now and verified_customer_id:
+                session["customer_id"] = verified_customer_id
             session["turns"].append(
                 {
                     "ts": session["updated_at"],
