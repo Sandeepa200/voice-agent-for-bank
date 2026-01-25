@@ -283,6 +283,8 @@ function App() {
 
   const sendTurn = async (audioBlob: Blob) => {
     if (!sessionIdRef.current) return;
+    const pendingTranscript = '(transcribing...)';
+    setMessages((prev) => [...prev, { role: 'user', text: pendingTranscript }]);
     setIsLoading(true);
     busyRef.current = true;
     try {
@@ -300,8 +302,30 @@ function App() {
         audio_base64: string | null;
       };
 
-      setMessages((prev) => [...prev, { role: 'user', text: user_transcript }, { role: 'agent', text: agent_response }]);
+      setMessages((prev) => {
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i -= 1) {
+          if (next[i].role === 'user' && next[i].text === pendingTranscript) {
+            next[i] = { role: 'user', text: user_transcript };
+            break;
+          }
+        }
+        next.push({ role: 'agent', text: agent_response });
+        return next;
+      });
       await playAudioResponse(audio_base64);
+    } catch (error) {
+      setMessages((prev) => {
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i -= 1) {
+          if (next[i].role === 'user' && next[i].text === pendingTranscript) {
+            next[i] = { role: 'user', text: '(could not transcribe)' };
+            break;
+          }
+        }
+        return next;
+      });
+      throw error;
     } finally {
       setIsLoading(false);
       busyRef.current = false;
@@ -492,7 +516,7 @@ function App() {
           <div className="chat-window">
             {messages.length === 0 && (
               <div className="empty-state">
-                <p>No conversation yet. Say \"Hello\" or \"Check my balance\".</p>
+                <p>No conversation yet. Say "Hello" or "Check my balance".</p>
               </div>
             )}
             {messages.map((msg, idx) => (

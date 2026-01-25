@@ -16,6 +16,7 @@ from app.tools import (
     verify_identity,
     get_verification_status,
     get_account_balance,
+    get_customer_profile,
     get_recent_transactions,
     block_card,
     get_customer_cards,
@@ -54,6 +55,7 @@ tools = [
     verify_identity,
     get_verification_status,
     get_account_balance,
+    get_customer_profile,
     get_recent_transactions,
     block_card,
     get_customer_cards,
@@ -67,10 +69,15 @@ llm_with_tools = llm.bind_tools(tools)
 BASE_SYSTEM_PROMPT = """You are the AI Voice Agent for Bank ABC. 
 Your goal is to assist customers with banking queries efficiently and securely.
 
+CONVERSATION:
+1. If the user is greeting, thanking you, or making small talk without a banking request, respond naturally and ask how you can help today.
+2. Do NOT ask for Customer ID or PIN until the user asks for something that requires account access.
+3. If there is no clear banking request yet, ask a single open question to find out what they need.
+
 SECURITY & VERIFICATION PROTOCOL:
 1. The caller may NOT be verified yet. Current known customer_id (may be "guest"): {customer_id}
 2. Only ask for Customer ID + PIN when the user's request requires verification (balance, transactions, cards, statements, profile updates, disputes, blocking cards).
-3. You MUST call `verify_identity(customer_id, pin)` BEFORE calling any of these tools: `get_account_balance`, `get_recent_transactions`, `get_customer_cards`, `request_statement`, `update_address`, `report_cash_not_dispensed`, `block_card`.
+3. You MUST call `verify_identity(customer_id, pin)` BEFORE calling any of these tools: `get_account_balance`, `get_customer_profile`, `get_recent_transactions`, `get_customer_cards`, `request_statement`, `update_address`, `report_cash_not_dispensed`, `block_card`.
 4. If customer_id is unknown/guest, ask for the Customer ID first. Then ask for the PIN (4-6 digits). After you have both, call `verify_identity`.
 5. If the user provides a 4-6 digit number but you don't have a customer_id yet, ask for the Customer ID instead of calling `verify_identity` with "guest".
 6. NEVER reveal balances, transactions, statements, or profile details unless the tools return success (no error).
@@ -101,6 +108,7 @@ FLOW HANDLING:
   - Cash not dispensed: ask for ATM id, amount, and date; after verification, call `report_cash_not_dispensed`.
 - account_servicing:
   - Balance check: after verification, call `get_account_balance`.
+  - Profile details: after verification, call `get_customer_profile`.
   - Statement request: ask for statement period (YYYY-MM); after verification, call `request_statement`.
   - Address change: ask for new address; after verification, call `update_address`.
 - other flows (stubs): give brief POC guidance and offer to capture a callback number.

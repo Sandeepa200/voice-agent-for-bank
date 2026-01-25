@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import re
 from typing import List, Dict, Optional
 
 from langchain_core.tools import tool
@@ -26,6 +27,37 @@ def reset_verification(customer_id: str) -> None:
     _VERIFIED_UNTIL.pop(customer_id, None)
 
 
+_WORD_TO_DIGIT = {
+    "zero": "0",
+    "oh": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+}
+
+
+def _normalize_pin(pin: str) -> str:
+    s = (pin or "").strip().lower()
+    if not s:
+        return ""
+    tokens = re.findall(r"[a-z]+|\d+", s)
+    digits: list[str] = []
+    for t in tokens:
+        if t.isdigit():
+            digits.extend(list(t))
+            continue
+        d = _WORD_TO_DIGIT.get(t)
+        if d is not None:
+            digits.append(d)
+    return "".join(digits)
+
+
 def _is_verified(customer_id: str) -> bool:
     until = _VERIFIED_UNTIL.get(customer_id)
     if not until:
@@ -38,7 +70,7 @@ def _is_verified(customer_id: str) -> bool:
 
 MOCK_DB: Dict[str, Dict] = {
     "customers": {
-        "user_123": {
+        "user123": {
             "pin": "1234",
             "name": "John Doe",
             "profile": {
@@ -64,7 +96,7 @@ MOCK_DB: Dict[str, Dict] = {
         }
     },
     "cards": {
-        "card_123": {"customer_id": "user_123", "status": "active"}
+        "card_123": {"customer_id": "user123", "status": "active"}
     },
     "disputes": {},
 }
@@ -82,7 +114,10 @@ def verify_identity_raw(customer_id: str, pin: str) -> bool:
     customer = MOCK_DB["customers"].get(customer_id)
     if not customer:
         return False
-    if customer["pin"] != pin:
+    normalized = _normalize_pin(pin)
+    if len(normalized) < 4 or len(normalized) > 6:
+        return False
+    if customer["pin"] != normalized:
         return False
     _VERIFIED_UNTIL[customer_id] = time.time() + VERIFICATION_TTL_SECONDS
     return True
@@ -121,6 +156,26 @@ def get_account_balance(customer_id: str) -> Dict:
         "available": acct["available"],
         "currency": acct["currency"],
         "as_of": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+@tool
+def get_customer_profile(customer_id: str) -> Dict:
+    """Return the customer's basic profile details (requires verification)."""
+    if not _is_tool_enabled("get_customer_profile"):
+        return {"error": "tool_disabled"}
+    if not _is_verified(customer_id):
+        return {"error": "identity_not_verified"}
+    customer = MOCK_DB["customers"].get(customer_id)
+    if not customer:
+        return {"error": "customer_not_found"}
+    profile = customer.get("profile") or {}
+    return {
+        "customer_id": customer_id,
+        "name": customer.get("name"),
+        "address": profile.get("address"),
+        "phone": profile.get("phone"),
+        "email": profile.get("email"),
     }
 
 
