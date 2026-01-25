@@ -10,12 +10,15 @@ interface Message {
 
 // Get API URL from env or default to localhost
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const ONNX_WASM_BASE_PATH = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+const VAD_BASE_ASSET_PATH = 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/';
 
 function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [callStatus, setCallStatus] = useState<'idle' | 'connecting' | 'in_call' | 'ending'>('idle');
   const [isListening, setIsListening] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const sessionIdRef = useRef<string | null>(null);
   const customerIdRef = useRef<string>('user_123');
@@ -107,8 +110,61 @@ function App() {
     return v;
   };
 
+  const formatStartCallError = (error: unknown) => {
+    if (axios.isAxiosError(error)) {
+      if (error.response) {
+        const status = error.response.status;
+        const detail =
+          typeof error.response.data === 'string'
+            ? error.response.data
+            : (error.response.data as any)?.detail || (error.response.data as any)?.error || JSON.stringify(error.response.data);
+        return `Backend error (${status}): ${detail}`;
+      }
+      if (error.request) {
+        return `Could not reach backend at ${API_URL}. Is it running?`;
+      }
+      return `Request error: ${error.message}`;
+    }
+
+    if (error instanceof Error) {
+      const name = (error as any).name as string | undefined;
+      if (error.message === 'VAD not loaded') {
+        return 'Voice activity detector failed to load (blocked CDN?). Disable ad blockers and refresh.';
+      }
+      if (name === 'NotAllowedError') {
+        return 'Microphone permission was denied. Allow mic access in the browser and try again.';
+      }
+      if (name === 'NotFoundError') {
+        return 'No microphone device found. Plug in a mic/headset and try again.';
+      }
+      if (name === 'NotReadableError') {
+        return 'Microphone is already in use by another app. Close other apps and try again.';
+      }
+      if (name === 'SecurityError') {
+        return 'Microphone access requires HTTPS or localhost.';
+      }
+      return error.message || 'Unknown error';
+    }
+
+    return 'Unknown error';
+  };
+
   const startCapture = async () => {
     if (vadRef.current) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('Microphone API not available in this browser/context.');
+    }
+    if (
+      !window.isSecureContext &&
+      window.location.hostname !== 'localhost' &&
+      window.location.hostname !== '127.0.0.1'
+    ) {
+      const err = new Error('Microphone access requires HTTPS or localhost.');
+      (err as any).name = 'SecurityError';
+      throw err;
+    }
+
+    const v = ensureVad();
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -117,9 +173,10 @@ function App() {
       },
     });
     vadStreamRef.current = stream;
-    const v = ensureVad();
     vadRef.current = await v.MicVAD.new({
       stream,
+      onnxWASMBasePath: ONNX_WASM_BASE_PATH,
+      baseAssetPath: VAD_BASE_ASSET_PATH,
       onSpeechStart: () => {
         setIsListening(true);
       },
@@ -229,7 +286,9 @@ function App() {
   const startCall = async () => {
     setCallStatus('connecting');
     setMessages([]);
+    setErrorMessage(null);
     try {
+      await startCapture();
       const formData = new FormData();
       formData.append('customer_id', customerIdRef.current);
       const resp = await axios.post(`${API_URL}/call/start`, formData, {
@@ -246,11 +305,10 @@ function App() {
       callActiveRef.current = true;
       setMessages([{ role: 'agent', text: agent_response }]);
       await playAudioResponse(audio_base64);
-      await startCapture();
       setCallStatus('in_call');
     } catch (error) {
       console.error(error);
-      alert('Could not start the call. Check microphone permissions and backend status.');
+      setErrorMessage(formatStartCallError(error));
       setCallStatus('idle');
       callActiveRef.current = false;
       void stopCapture();
@@ -258,6 +316,7 @@ function App() {
   };
 
   const endCall = async () => {
+    setErrorMessage(null);
     if (!sessionIdRef.current) {
       setCallStatus('idle');
       callActiveRef.current = false;
@@ -290,6 +349,7 @@ function App() {
       <header className="header">
         <h1>Bank ABC Voice Agent</h1>
         <p>{callStatus === 'in_call' ? (isListening ? 'Listening…' : 'On call…') : 'Start a call to speak naturally'}</p>
+        {errorMessage && <p className="error-banner">{errorMessage}</p>}
       </header>
 
       <div className="chat-window">

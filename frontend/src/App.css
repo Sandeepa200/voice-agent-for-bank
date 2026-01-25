@@ -30,6 +30,17 @@
   font-size: 1.5rem;
 }
 
+.error-banner {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background-color: rgba(231, 76, 60, 0.15);
+  color: #ffd7d2;
+  font-size: 0.9rem;
+  text-align: left;
+  line-height: 1.35;
+}
+
 .chat-window {
   flex: 1;
   padding: 20px;
