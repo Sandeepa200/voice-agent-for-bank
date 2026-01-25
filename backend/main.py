@@ -40,15 +40,20 @@ from app.config_repo import ensure_seed_data, get_env_config, list_environments,
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
+def _has_valid_mongodb_uri() -> bool:
+    uri = (os.environ.get("MONGODB_URI") or "").strip()
+    return uri.startswith("mongodb://") or uri.startswith("mongodb+srv://")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    if os.environ.get("MONGODB_URI"):
+    if _has_valid_mongodb_uri():
         await init_db()
         await ensure_seed_data()
         cfg = await get_env_config("dev")
         set_tool_flags(cfg.get("tool_flags") or {})
     yield
-    if os.environ.get("MONGODB_URI"):
+    if _has_valid_mongodb_uri():
         get_mongo_client().close()
 
 
@@ -70,7 +75,7 @@ app.add_middleware(
 # WARNING: This resets on server restart and doesn't scale.
 # Use Redis for production.
 SESSIONS = {}
-USE_MONGO = bool(os.environ.get("MONGODB_URI"))
+USE_MONGO = _has_valid_mongodb_uri()
 
 # Max audio size: 10MB
 MAX_FILE_SIZE = 10 * 1024 * 1024 

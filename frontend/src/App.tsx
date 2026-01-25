@@ -14,6 +14,25 @@ const ONNX_WASM_BASE_PATH = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0
 const VAD_BASE_ASSET_PATH = 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/';
 const ENV_KEY = 'dev';
 
+type ToolFlag = { enabled: boolean; params?: unknown };
+type ToolFlags = Record<string, ToolFlag>;
+
+type MicVADInstance = {
+  pause?: () => Promise<void>;
+  destroy?: () => Promise<void>;
+  start?: () => Promise<void>;
+};
+
+type MicVADNew = (args: unknown) => Promise<MicVADInstance>;
+
+type MicVADModule = {
+  MicVAD: {
+    new: MicVADNew;
+  };
+};
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
 function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -27,7 +46,7 @@ function App() {
 
   const [baseSystemPrompt, setBaseSystemPrompt] = useState('');
   const [routerPrompt, setRouterPrompt] = useState('');
-  const [toolFlags, setToolFlags] = useState<Record<string, { enabled: boolean; params?: any }>>({});
+  const [toolFlags, setToolFlags] = useState<ToolFlags>({});
   const [routingRulesText, setRoutingRulesText] = useState('{}');
   const [authOpen, setAuthOpen] = useState(false);
   const [authCustomerId, setAuthCustomerId] = useState('user_123');
@@ -41,7 +60,7 @@ function App() {
 
   const isPlayingRef = useRef(false);
   const busyRef = useRef(false);
-  const vadRef = useRef<any>(null);
+  const vadRef = useRef<MicVADInstance | null>(null);
   const vadStreamRef = useRef<MediaStream | null>(null);
   const pendingAudioRef = useRef<Float32Array[]>([]);
   const pendingTimerRef = useRef<number | null>(null);
@@ -104,14 +123,10 @@ function App() {
     setIsListening(false);
     try {
       if (vadRef.current?.pause) await vadRef.current.pause();
-    } catch (_e) {
-      undefined;
-    }
+    } catch {}
     try {
       if (vadRef.current?.destroy) await vadRef.current.destroy();
-    } catch (_e) {
-      undefined;
-    }
+    } catch {}
     vadRef.current = null;
     if (vadStreamRef.current) {
       vadStreamRef.current.getTracks().forEach((t) => t.stop());
@@ -119,20 +134,26 @@ function App() {
     }
   };
 
-  const ensureVad = () => {
-    const v = (window as any).vad;
-    if (!v?.MicVAD?.new) throw new Error('VAD not loaded');
-    return v;
+  const ensureVad = (): MicVADModule => {
+    const v = (window as unknown as { vad?: { MicVAD?: { new?: MicVADNew } } }).vad;
+    const micNew = v?.MicVAD?.new;
+    if (!micNew) throw new Error('VAD not loaded');
+    return { MicVAD: { new: micNew } };
   };
 
   const formatStartCallError = (error: unknown) => {
     if (axios.isAxiosError(error)) {
       if (error.response) {
         const status = error.response.status;
-        const detail =
-          typeof error.response.data === 'string'
-            ? error.response.data
-            : (error.response.data as any)?.detail || (error.response.data as any)?.error || JSON.stringify(error.response.data);
+        const data: unknown = error.response.data;
+        let detail: string | undefined;
+        if (typeof data === 'string') {
+          detail = data;
+        } else if (isRecord(data)) {
+          if (typeof data.detail === 'string') detail = data.detail;
+          else if (typeof data.error === 'string') detail = data.error;
+        }
+        if (!detail) detail = JSON.stringify(data);
         return `Backend error (${status}): ${detail}`;
       }
       if (error.request) {
@@ -142,7 +163,7 @@ function App() {
     }
 
     if (error instanceof Error) {
-      const name = (error as any).name as string | undefined;
+      const name = error.name;
       if (error.message === 'VAD not loaded') {
         return 'Voice activity detector failed to load (blocked CDN?). Disable ad blockers and refresh.';
       }
@@ -175,7 +196,7 @@ function App() {
       window.location.hostname !== '127.0.0.1'
     ) {
       const err = new Error('Microphone access requires HTTPS or localhost.');
-      (err as any).name = 'SecurityError';
+        (err as Error & { name: string }).name = 'SecurityError';
       throw err;
     }
 
@@ -227,9 +248,7 @@ function App() {
     setIsListening(false);
     try {
       if (vadRef.current?.pause) await vadRef.current.pause();
-    } catch (_e) {
-      undefined;
-    }
+    } catch {}
   };
 
   const resumeCapture = async () => {
@@ -240,9 +259,7 @@ function App() {
     }
     try {
       if (vadRef.current?.start) await vadRef.current.start();
-    } catch (_e) {
-      undefined;
-    }
+    } catch {}
   };
 
   useEffect(() => {
@@ -391,11 +408,18 @@ function App() {
     setAdminMessage(null);
     try {
       const cfgResp = await axios.get(`${API_URL}/admin/config`, { params: { env: ENV_KEY } });
-      const cfg = cfgResp.data as any;
-      setBaseSystemPrompt(cfg.base_system_prompt || '');
-      setRouterPrompt(cfg.router_prompt || '');
-      setToolFlags((cfg.tool_flags || {}) as Record<string, { enabled: boolean; params?: any }>);
-      setRoutingRulesText(JSON.stringify(cfg.routing_rules || {}, null, 2));
+      const cfg: unknown = cfgResp.data;
+      if (!isRecord(cfg)) {
+        setBaseSystemPrompt('');
+        setRouterPrompt('');
+        setToolFlags({});
+        setRoutingRulesText('{}');
+        return;
+      }
+      setBaseSystemPrompt(typeof cfg.base_system_prompt === 'string' ? cfg.base_system_prompt : '');
+      setRouterPrompt(typeof cfg.router_prompt === 'string' ? cfg.router_prompt : '');
+      setToolFlags(isRecord(cfg.tool_flags) ? (cfg.tool_flags as ToolFlags) : {});
+      setRoutingRulesText(JSON.stringify(isRecord(cfg.routing_rules) ? cfg.routing_rules : {}, null, 2));
     } catch (e) {
       setAdminMessage(formatStartCallError(e));
     } finally {
