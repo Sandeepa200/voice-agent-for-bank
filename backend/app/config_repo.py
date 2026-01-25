@@ -23,16 +23,13 @@ async def ensure_env_config(env_key: str) -> None:
         "router_prompt": None,
         "tool_flags": {},
         "routing_rules": {},
-        # "updated_at": now # configs table schema doesn't have updated_at in my migration, oops.
-        # Let's check my migration.
-        # create table if not exists configs ( env_key text primary key, base_system_prompt text, router_prompt text, tool_flags jsonb, routing_rules jsonb );
-        # I forgot updated_at. I should add it or ignore it.
-        # Python code uses it.
-        # I'll update migration or just ignore it in code.
-        # Ignoring it is easier for now as I can't easily alter table without new migration (which I can do).
-        # But for POC, I'll just skip updated_at in insert.
+        "updated_at": now,
     }
-    await run_in_threadpool(lambda: db.table("configs").insert(data).execute())
+    try:
+        await run_in_threadpool(lambda: db.table("configs").insert(data).execute())
+    except Exception:
+        data.pop("updated_at", None)
+        await run_in_threadpool(lambda: db.table("configs").insert(data).execute())
 
 
 async def list_environments() -> list[Dict[str, Any]]:
@@ -58,7 +55,7 @@ async def update_env_config(
 ) -> Dict[str, Any]:
     db = get_supabase_client()
     await ensure_env_config(env_key)
-    update: Dict[str, Any] = {}
+    update: Dict[str, Any] = {"updated_at": time.time()}
     if base_system_prompt is not None:
         update["base_system_prompt"] = base_system_prompt
     if router_prompt is not None:
@@ -68,7 +65,10 @@ async def update_env_config(
     if routing_rules is not None:
         update["routing_rules"] = routing_rules
     
-    if update:
+    try:
+        await run_in_threadpool(lambda: db.table("configs").update(update).eq("env_key", env_key).execute())
+    except Exception:
+        update.pop("updated_at", None)
         await run_in_threadpool(lambda: db.table("configs").update(update).eq("env_key", env_key).execute())
     
     return await get_env_config(env_key)

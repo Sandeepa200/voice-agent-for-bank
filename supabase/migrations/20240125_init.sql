@@ -23,5 +23,6 @@ create table if not exists configs (
   base_system_prompt text,
   router_prompt text,
   tool_flags jsonb,
-  routing_rules jsonb
+  routing_rules jsonb,
+  updated_at double precision
 );

@@ -47,14 +47,21 @@ def _has_valid_db_uri() -> bool:
     key = os.environ.get("SUPABASE_SERVICE_KEY")
     return bool(url and key)
 
+async def _load_runtime_config(env_key: str) -> None:
+    cfg = await get_env_config(env_key)
+    defaults = get_agent_config()
+    base_system_prompt = cfg.get("base_system_prompt") or defaults.get("base_system_prompt")
+    router_prompt = cfg.get("router_prompt") or defaults.get("router_prompt")
+    update_agent_config(base_system_prompt=base_system_prompt, router_prompt=router_prompt)
+    set_tool_flags(cfg.get("tool_flags") or {})
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     if _has_valid_db_uri():
         await init_db()
         await ensure_seed_data()
-        cfg = await get_env_config("dev")
-        set_tool_flags(cfg.get("tool_flags") or {})
+        await _load_runtime_config("dev")
     yield
 
 
@@ -170,6 +177,8 @@ async def start_call(env_key: str = Form("dev")):
     customer_id = "guest"
     session_id = await _new_session_db(customer_id, env_key) if USE_DB else _new_session(customer_id)
     reset_verification(customer_id)
+    if USE_DB:
+        await _load_runtime_config(env_key)
     greeting = "Hello, welcome to Bank ABC. How can I help you today?"
     audio_bytes = await synthesize_audio(greeting)
     if USE_DB:
@@ -208,6 +217,8 @@ async def call_turn(
         session = await get_session(session_id)
         if not session or session.get("ended"):
             raise HTTPException(status_code=404, detail="Session not found or ended")
+        env_key = session.get("env_key") or "dev"
+        await _load_runtime_config(env_key)
     else:
         session = SESSIONS.get(session_id)
         if not session or session.get("ended"):
