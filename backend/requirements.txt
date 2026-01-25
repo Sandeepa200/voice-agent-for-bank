@@ -10,5 +10,4 @@ deepgram-sdk
 httpx
 pydantic
 python-multipart
-motor
 supabase
