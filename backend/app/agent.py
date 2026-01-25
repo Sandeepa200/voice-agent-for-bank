@@ -43,12 +43,43 @@ class AgentState(TypedDict):
     flow: Optional[FlowName]
 
 # --- 2. Setup LLM & Tools ---
-# Using Groq's Llama-3.3-70b-versatile for high intelligence
-llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=os.environ.get("GROQ_API_KEY"),
-    temperature=0
+_DEFAULT_PRIMARY_MODEL = os.environ.get("GROQ_CHAT_MODEL") or os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile"
+_DEFAULT_FALLBACKS = ",".join(
+    [
+        _DEFAULT_PRIMARY_MODEL,
+        "llama-3.1-8b-instant",
+        "llama-3.1-70b-versatile",
+        "gemma2-9b-it",
+        "mixtral-8x7b-32768",
+    ]
 )
+_MODEL_CANDIDATES = [
+    m.strip()
+    for m in (os.environ.get("GROQ_MODEL_FALLBACKS") or _DEFAULT_FALLBACKS).split(",")
+    if m.strip()
+]
+
+_LLM_CACHE: dict[str, ChatGroq] = {}
+_LLM_WITH_TOOLS_CACHE: dict[str, object] = {}
+_ACTIVE_MODEL: str = _MODEL_CANDIDATES[0] if _MODEL_CANDIDATES else _DEFAULT_PRIMARY_MODEL
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "error code: 429" in s or "rate_limit_exceeded" in s or "rate limit reached" in s
+
+
+def _get_llm(model: str) -> ChatGroq:
+    cached = _LLM_CACHE.get(model)
+    if cached is not None:
+        return cached
+    created = ChatGroq(
+        model=model,
+        api_key=os.environ.get("GROQ_API_KEY"),
+        temperature=0,
+    )
+    _LLM_CACHE[model] = created
+    return created
 
 # Bind tools to the LLM
 tools = [
@@ -63,7 +94,38 @@ tools = [
     update_address,
     report_cash_not_dispensed,
 ]
-llm_with_tools = llm.bind_tools(tools)
+
+
+def _get_llm_with_tools(model: str):
+    cached = _LLM_WITH_TOOLS_CACHE.get(model)
+    if cached is not None:
+        return cached
+    bound = _get_llm(model).bind_tools(tools)
+    _LLM_WITH_TOOLS_CACHE[model] = bound
+    return bound
+
+
+def _invoke_llm_with_fallback(*, system_prompt: str, messages: list, with_tools: bool):
+    global _ACTIVE_MODEL
+    ordered = [_ACTIVE_MODEL] + [m for m in _MODEL_CANDIDATES if m != _ACTIVE_MODEL]
+    last_exc: Optional[Exception] = None
+    for model in ordered:
+        try:
+            if with_tools:
+                llm_obj = _get_llm_with_tools(model)
+            else:
+                llm_obj = _get_llm(model)
+            resp = llm_obj.invoke([SystemMessage(content=system_prompt)] + messages)
+            _ACTIVE_MODEL = model
+            return resp
+        except Exception as e:
+            last_exc = e
+            if _is_rate_limited(e):
+                continue
+            continue
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("No model candidates available")
 
 # --- 3. System Prompt ---
 BASE_SYSTEM_PROMPT = """You are the AI Voice Agent for Bank ABC. 
@@ -254,7 +316,16 @@ def router(state: AgentState):
             last_user_text = m[1]
             break
 
-    resp = llm.invoke([SystemMessage(content=AGENT_CONFIG["router_prompt"]), HumanMessage(content=last_user_text or "")])
+    router_prompt = AGENT_CONFIG["router_prompt"]
+    try:
+        router_prompt = router_prompt.format(last_user_message=last_user_text or "")
+    except Exception:
+        pass
+    resp = _invoke_llm_with_fallback(
+        system_prompt=router_prompt,
+        messages=[HumanMessage(content=last_user_text or "")],
+        with_tools=False,
+    )
     label = (resp.content or "").strip()
     allowed = {
         "card_atm_issues",
@@ -274,7 +345,7 @@ def chatbot(state: AgentState):
         flow=state.get("flow") or "account_servicing",
     )
     
-    response = llm_with_tools.invoke([SystemMessage(content=current_prompt)] + state["messages"])
+    response = _invoke_llm_with_fallback(system_prompt=current_prompt, messages=state["messages"], with_tools=True)
     return {"messages": [response]}
 
 # --- 5. Build Graph ---

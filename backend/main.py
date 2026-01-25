@@ -169,6 +169,15 @@ def _extract_verify_success(tool_calls: list, messages: list) -> tuple[Optional[
                 cid = args.get("customer_id")
                 if isinstance(cid, str) and cid.strip():
                     verified_customer_id = cid.strip()
+            if not verified_customer_id:
+                for c in reversed(tool_calls or []):
+                    if not isinstance(c, dict) or c.get("name") != "verify_identity":
+                        continue
+                    args = c.get("args") if isinstance(c.get("args"), dict) else {}
+                    cid = args.get("customer_id")
+                    if isinstance(cid, str) and cid.strip():
+                        verified_customer_id = cid.strip()
+                        break
             break
     return verified_customer_id, attempts, verified
 
@@ -225,6 +234,21 @@ def _apply_sensitive_guardrail(*, agent_text: str, messages: list, customer_id: 
     if reveals_contact and not _tool_succeeded(messages, "get_customer_profile"):
         return _verification_prompt(customer_id)
     return text
+
+
+def _is_rate_limited_error(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "error code: 429" in s or "rate_limit_exceeded" in s or "rate limit reached" in s
+
+
+def _extract_retry_after_seconds(exc: Exception) -> Optional[int]:
+    s = str(exc)
+    m = re.search(r"try again in\s+(\d+)m([\d.]+)s", s, flags=re.IGNORECASE)
+    if not m:
+        return None
+    minutes = int(m.group(1))
+    seconds = float(m.group(2))
+    return int(max(0, minutes * 60 + seconds))
 
 
 @app.post("/call/start")
@@ -313,14 +337,23 @@ async def call_turn(
 
         current_customer_id = session.get("customer_id") or "guest"
         inputs = {"messages": messages, "customer_id": current_customer_id, "flow": None}
-        result = agent_app.invoke(
-            inputs,
-            config={
-                "run_name": f"bank-abc-call-turn:{session_id}",
-                "metadata": {"session_id": session_id, "customer_id": current_customer_id},
-                "tags": ["bank-abc", "voice-agent"],
-            },
-        )
+        try:
+            result = agent_app.invoke(
+                inputs,
+                config={
+                    "run_name": f"bank-abc-call-turn:{session_id}",
+                    "metadata": {"session_id": session_id, "customer_id": current_customer_id},
+                    "tags": ["bank-abc", "voice-agent"],
+                },
+            )
+        except Exception as e:
+            if _is_rate_limited_error(e):
+                retry_after = _extract_retry_after_seconds(e)
+                headers = {}
+                if retry_after is not None:
+                    headers["Retry-After"] = str(retry_after)
+                raise HTTPException(status_code=429, detail="LLM rate limit reached. Please try again shortly.", headers=headers)
+            raise
 
         bot_response = _sanitize_agent_text(result["messages"][-1].content or "")
         all_tool_calls = []
