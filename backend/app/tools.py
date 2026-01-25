@@ -7,6 +7,19 @@ from langchain_core.tools import tool
 
 VERIFICATION_TTL_SECONDS = 10 * 60
 _VERIFIED_UNTIL: Dict[str, float] = {}
+_TOOL_FLAGS: Dict[str, Dict] = {}
+
+
+def set_tool_flags(tool_flags: Dict[str, Dict]) -> None:
+    global _TOOL_FLAGS
+    _TOOL_FLAGS = dict(tool_flags or {})
+
+
+def _is_tool_enabled(name: str) -> bool:
+    entry = _TOOL_FLAGS.get(name)
+    if entry is None:
+        return True
+    return bool(entry.get("enabled", True))
 
 
 def reset_verification(customer_id: str) -> None:
@@ -60,6 +73,12 @@ MOCK_DB: Dict[str, Dict] = {
 @tool
 def verify_identity(customer_id: str, pin: str) -> bool:
     """Verify a customer's identity using customer_id and PIN."""
+    if not _is_tool_enabled("verify_identity"):
+        return False
+    return verify_identity_raw(customer_id, pin)
+
+
+def verify_identity_raw(customer_id: str, pin: str) -> bool:
     customer = MOCK_DB["customers"].get(customer_id)
     if not customer:
         return False
@@ -72,6 +91,8 @@ def verify_identity(customer_id: str, pin: str) -> bool:
 @tool
 def get_verification_status(customer_id: str) -> Dict:
     """Return verification status for the current session (verified + remaining TTL seconds)."""
+    if not _is_tool_enabled("get_verification_status"):
+        return {"verified": False, "expires_in_seconds": 0, "error": "tool_disabled"}
     until = _VERIFIED_UNTIL.get(customer_id)
     if not until:
         return {"verified": False, "expires_in_seconds": 0}
@@ -85,6 +106,8 @@ def get_verification_status(customer_id: str) -> Dict:
 @tool
 def get_account_balance(customer_id: str) -> Dict:
     """Return the customer's account balance details (requires verification)."""
+    if not _is_tool_enabled("get_account_balance"):
+        return {"error": "tool_disabled"}
     if not _is_verified(customer_id):
         return {"error": "identity_not_verified"}
     customer = MOCK_DB["customers"].get(customer_id)
@@ -104,6 +127,8 @@ def get_account_balance(customer_id: str) -> Dict:
 @tool
 def get_recent_transactions(customer_id: str, count: int = 3) -> List[Dict]:
     """Return the customer's most recent transactions (requires verification)."""
+    if not _is_tool_enabled("get_recent_transactions"):
+        return [{"error": "tool_disabled"}]
     if not _is_verified(customer_id):
         return [{"error": "identity_not_verified"}]
     customer = MOCK_DB["customers"].get(customer_id)
@@ -116,6 +141,8 @@ def get_recent_transactions(customer_id: str, count: int = 3) -> List[Dict]:
 @tool
 def block_card(card_id: str, reason: str) -> str:
     """Block a card permanently by card_id (requires verification)."""
+    if not _is_tool_enabled("block_card"):
+        return "Error: Tool disabled."
     card = MOCK_DB["cards"].get(card_id)
     if not card:
         return "Error: Card not found."
@@ -135,6 +162,8 @@ def block_card(card_id: str, reason: str) -> str:
 @tool
 def get_customer_cards(customer_id: str) -> List[Dict]:
     """List a customer's cards (requires verification)."""
+    if not _is_tool_enabled("get_customer_cards"):
+        return [{"error": "tool_disabled"}]
     if not _is_verified(customer_id):
         return [{"error": "identity_not_verified"}]
     customer = MOCK_DB["customers"].get(customer_id)
@@ -146,6 +175,8 @@ def get_customer_cards(customer_id: str) -> List[Dict]:
 @tool
 def request_statement(customer_id: str, period: str) -> Dict:
     """Request a monthly statement for a given period (YYYY-MM) (requires verification)."""
+    if not _is_tool_enabled("request_statement"):
+        return {"error": "tool_disabled"}
     if not _is_verified(customer_id):
         return {"error": "identity_not_verified"}
     customer = MOCK_DB["customers"].get(customer_id)
@@ -160,6 +191,8 @@ def request_statement(customer_id: str, period: str) -> Dict:
 @tool
 def update_address(customer_id: str, new_address: str) -> Dict:
     """Update the customer's profile address (requires verification)."""
+    if not _is_tool_enabled("update_address"):
+        return {"error": "tool_disabled"}
     if not _is_verified(customer_id):
         return {"error": "identity_not_verified"}
     customer = MOCK_DB["customers"].get(customer_id)
@@ -172,6 +205,8 @@ def update_address(customer_id: str, new_address: str) -> Dict:
 @tool
 def report_cash_not_dispensed(customer_id: str, atm_id: str, amount: float, date: str) -> Dict:
     """Submit a dispute for an ATM cash-not-dispensed incident (requires verification)."""
+    if not _is_tool_enabled("report_cash_not_dispensed"):
+        return {"error": "tool_disabled"}
     if not _is_verified(customer_id):
         return {"error": "identity_not_verified"}
     if customer_id not in MOCK_DB["customers"]:

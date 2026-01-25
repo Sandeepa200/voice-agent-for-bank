@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { Phone, PhoneOff, Loader2 } from 'lucide-react';
+import { Phone, PhoneOff, Loader2, Shield, ArrowLeft, Save } from 'lucide-react';
 import './App.css';
 
 interface Message {
@@ -9,9 +9,10 @@ interface Message {
 }
 
 // Get API URL from env or default to localhost
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_URL = import.meta.env.VITE_API_URL || '';
 const ONNX_WASM_BASE_PATH = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
 const VAD_BASE_ASSET_PATH = 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/';
+const ENV_KEY = 'dev';
 
 function App() {
   const [isLoading, setIsLoading] = useState(false);
@@ -19,6 +20,20 @@ function App() {
   const [callStatus, setCallStatus] = useState<'idle' | 'connecting' | 'in_call' | 'ending'>('idle');
   const [isListening, setIsListening] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [view, setView] = useState<'call' | 'admin'>('call');
+
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [adminMessage, setAdminMessage] = useState<string | null>(null);
+
+  const [baseSystemPrompt, setBaseSystemPrompt] = useState('');
+  const [routerPrompt, setRouterPrompt] = useState('');
+  const [toolFlags, setToolFlags] = useState<Record<string, { enabled: boolean; params?: any }>>({});
+  const [routingRulesText, setRoutingRulesText] = useState('{}');
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authCustomerId, setAuthCustomerId] = useState('user_123');
+  const [authPin, setAuthPin] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authSubmitting, setAuthSubmitting] = useState(false);
 
   const sessionIdRef = useRef<string | null>(null);
   const customerIdRef = useRef<string>('user_123');
@@ -284,13 +299,31 @@ function App() {
   };
 
   const startCall = async () => {
+    setAuthCustomerId(customerIdRef.current);
+    setAuthPin('');
+    setAuthError(null);
+    setAuthOpen(true);
+  };
+
+  const startCallWithAuth = async () => {
+    const cust = authCustomerId.trim();
+    const pin = authPin.trim();
+    if (!/^\d+$/.test(cust)) {
+      setAuthError('Customer ID must be digits only.');
+      return;
+    }
+    if (!/^\d+$/.test(pin) || pin.length < 4 || pin.length > 6) {
+      setAuthError('PIN must be 4 to 6 digits.');
+      return;
+    }
+    setAuthSubmitting(true);
     setCallStatus('connecting');
     setMessages([]);
     setErrorMessage(null);
     try {
-      await startCapture();
       const formData = new FormData();
-      formData.append('customer_id', customerIdRef.current);
+      formData.append('customer_id', cust);
+      formData.append('pin', pin);
       const resp = await axios.post(`${API_URL}/call/start`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
@@ -301,17 +334,26 @@ function App() {
         audio_base64: string | null;
       };
 
+      customerIdRef.current = cust;
       sessionIdRef.current = session_id;
       callActiveRef.current = true;
       setMessages([{ role: 'agent', text: agent_response }]);
       await playAudioResponse(audio_base64);
+      setAuthOpen(false);
+      setAuthPin('');
+      setAuthError(null);
+      await startCapture();
       setCallStatus('in_call');
     } catch (error) {
       console.error(error);
-      setErrorMessage(formatStartCallError(error));
+      const msg = formatStartCallError(error);
+      setAuthError(msg);
+      setErrorMessage(msg);
       setCallStatus('idle');
       callActiveRef.current = false;
       void stopCapture();
+    } finally {
+      setAuthSubmitting(false);
     }
   };
 
@@ -344,48 +386,221 @@ function App() {
     }
   };
 
+  const loadAdmin = async () => {
+    setAdminLoading(true);
+    setAdminMessage(null);
+    try {
+      const cfgResp = await axios.get(`${API_URL}/admin/config`, { params: { env: ENV_KEY } });
+      const cfg = cfgResp.data as any;
+      setBaseSystemPrompt(cfg.base_system_prompt || '');
+      setRouterPrompt(cfg.router_prompt || '');
+      setToolFlags((cfg.tool_flags || {}) as Record<string, { enabled: boolean; params?: any }>);
+      setRoutingRulesText(JSON.stringify(cfg.routing_rules || {}, null, 2));
+    } catch (e) {
+      setAdminMessage(formatStartCallError(e));
+    } finally {
+      setAdminLoading(false);
+    }
+  };
+
+  const openAdmin = async () => {
+    if (callStatus !== 'idle') return;
+    setView('admin');
+    await loadAdmin();
+  };
+
+  const closeAdmin = () => {
+    setAdminMessage(null);
+    setView('call');
+  };
+
+  const savePrompts = async () => {
+    setAdminLoading(true);
+    setAdminMessage(null);
+    try {
+      await axios.put(
+        `${API_URL}/admin/config`,
+        { base_system_prompt: baseSystemPrompt, router_prompt: routerPrompt },
+        { params: { env: ENV_KEY } }
+      );
+      setAdminMessage('Saved prompts.');
+    } catch (e) {
+      setAdminMessage(formatStartCallError(e));
+    } finally {
+      setAdminLoading(false);
+    }
+  };
+
+  const saveTools = async () => {
+    setAdminLoading(true);
+    setAdminMessage(null);
+    try {
+      await axios.put(`${API_URL}/admin/tools`, { tool_flags: toolFlags }, { params: { env: ENV_KEY } });
+      setAdminMessage('Saved tools.');
+    } catch (e) {
+      setAdminMessage(formatStartCallError(e));
+    } finally {
+      setAdminLoading(false);
+    }
+  };
+
+  const saveRouting = async () => {
+    setAdminLoading(true);
+    setAdminMessage(null);
+    try {
+      const parsed = JSON.parse(routingRulesText || '{}');
+      await axios.put(`${API_URL}/admin/routing`, { routing_rules: parsed }, { params: { env: ENV_KEY } });
+      setAdminMessage('Saved routing rules.');
+    } catch (e) {
+      setAdminMessage(e instanceof Error ? e.message : formatStartCallError(e));
+    } finally {
+      setAdminLoading(false);
+    }
+  };
+
+  const knownTools = [
+    'verify_identity',
+    'get_verification_status',
+    'get_account_balance',
+    'get_recent_transactions',
+    'block_card',
+    'get_customer_cards',
+    'request_statement',
+    'update_address',
+    'report_cash_not_dispensed',
+  ];
+
+  const toggleTool = (name: string, enabled: boolean) => {
+    setToolFlags((prev) => ({ ...prev, [name]: { ...(prev[name] || {}), enabled } }));
+  };
+
   return (
     <div className="app-container">
       <header className="header">
-        <h1>Bank ABC Voice Agent</h1>
-        <p>{callStatus === 'in_call' ? (isListening ? 'Listening…' : 'On call…') : 'Start a call to speak naturally'}</p>
+        <div className="header-row">
+          <div className="header-title">
+            <h1>Bank ABC Voice Agent</h1>
+            <p>{view === 'admin' ? 'Admin dashboard' : callStatus === 'in_call' ? (isListening ? 'Listening…' : 'On call…') : 'Start a call to speak naturally'}</p>
+          </div>
+          <div className="header-actions">
+            {view === 'call' ? (
+              <button className="header-button" onClick={() => void openAdmin()} disabled={callStatus !== 'idle'}>
+                <Shield size={16} /> Admin
+              </button>
+            ) : (
+              <button className="header-button" onClick={closeAdmin}>
+                <ArrowLeft size={16} /> Back
+              </button>
+            )}
+          </div>
+        </div>
         {errorMessage && <p className="error-banner">{errorMessage}</p>}
       </header>
 
-      <div className="chat-window">
-        {messages.length === 0 && (
-          <div className="empty-state">
-            <p>No conversation yet. Say "Hello" or "Check my balance".</p>
+      {view === 'call' ? (
+        <>
+          <div className="chat-window">
+            {messages.length === 0 && (
+              <div className="empty-state">
+                <p>No conversation yet. Say \"Hello\" or \"Check my balance\".</p>
+              </div>
+            )}
+            {messages.map((msg, idx) => (
+              <div key={idx} className={`message ${msg.role}`}>
+                <div className="message-bubble">
+                  <strong>{msg.role === 'user' ? 'You' : 'Agent'}:</strong> {msg.text}
+                </div>
+              </div>
+            ))}
+            {isLoading && (
+              <div className="message agent">
+                <div className="message-bubble loading">
+                  <Loader2 className="animate-spin" size={16} /> Thinking...
+                </div>
+              </div>
+            )}
           </div>
-        )}
-        {messages.map((msg, idx) => (
-          <div key={idx} className={`message ${msg.role}`}>
-            <div className="message-bubble">
-              <strong>{msg.role === 'user' ? 'You' : 'Agent'}:</strong> {msg.text}
-            </div>
-          </div>
-        ))}
-        {isLoading && (
-          <div className="message agent">
-            <div className="message-bubble loading">
-              <Loader2 className="animate-spin" size={16} /> Thinking...
-            </div>
-          </div>
-        )}
-      </div>
 
-      <div className="controls">
-        <button 
-          className={`mic-button ${callStatus === 'in_call' ? 'recording' : ''}`}
-          onClick={callStatus === 'in_call' ? endCall : startCall}
-          disabled={callStatus === 'connecting' || callStatus === 'ending'}
-        >
-          {callStatus === 'in_call' ? <PhoneOff size={32} /> : <Phone size={32} />}
-        </button>
-        <p className="instruction">
-          {callStatus === 'in_call' ? 'End Call' : 'Start Call'}
-        </p>
-      </div>
+          <div className="controls">
+            <button
+              className={`mic-button ${callStatus === 'in_call' ? 'recording' : ''}`}
+              onClick={callStatus === 'in_call' ? endCall : startCall}
+              disabled={callStatus === 'connecting' || callStatus === 'ending'}
+            >
+              {callStatus === 'in_call' ? <PhoneOff size={32} /> : <Phone size={32} />}
+            </button>
+            <p className="instruction">{callStatus === 'in_call' ? 'End Call' : 'Start Call'}</p>
+          </div>
+        </>
+      ) : (
+        <div className="admin-window">
+          <div className="admin-toolbar">
+            {adminMessage && <div className="admin-message">{adminMessage}</div>}
+          </div>
+
+          <div className="admin-section">
+            <div className="admin-section-header">
+              <h2>Prompts</h2>
+              <button className="admin-save" onClick={() => void savePrompts()} disabled={adminLoading}>
+                <Save size={16} /> Save
+              </button>
+            </div>
+            <label className="admin-label">Base System Prompt</label>
+            <textarea className="admin-textarea" value={baseSystemPrompt} onChange={(e) => setBaseSystemPrompt(e.target.value)} />
+            <label className="admin-label">Router Prompt</label>
+            <textarea className="admin-textarea" value={routerPrompt} onChange={(e) => setRouterPrompt(e.target.value)} />
+          </div>
+
+          <div className="admin-section">
+            <div className="admin-section-header">
+              <h2>Tools</h2>
+              <button className="admin-save" onClick={() => void saveTools()} disabled={adminLoading}>
+                <Save size={16} /> Save
+              </button>
+            </div>
+            <div className="tools-grid">
+              {knownTools.map((name) => (
+                <label key={name} className="tool-item">
+                  <input type="checkbox" checked={toolFlags[name]?.enabled ?? true} onChange={(e) => toggleTool(name, e.target.checked)} />
+                  <span>{name}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div className="admin-section">
+            <div className="admin-section-header">
+              <h2>Routing Rules (JSON)</h2>
+              <button className="admin-save" onClick={() => void saveRouting()} disabled={adminLoading}>
+                <Save size={16} /> Save
+              </button>
+            </div>
+            <textarea className="admin-textarea" value={routingRulesText} onChange={(e) => setRoutingRulesText(e.target.value)} />
+          </div>
+        </div>
+      )}
+
+      {authOpen && view === 'call' && (
+        <div className="modal-overlay">
+          <div className="modal">
+            <h2>Verify Identity</h2>
+            <p className="modal-subtitle">Enter Customer ID and PIN before starting the call.</p>
+            <label className="modal-label">Customer ID</label>
+            <input className="modal-input" value={authCustomerId} onChange={(e) => setAuthCustomerId(e.target.value)} inputMode="numeric" />
+            <label className="modal-label">PIN (4–6 digits)</label>
+            <input className="modal-input" value={authPin} onChange={(e) => setAuthPin(e.target.value)} inputMode="numeric" type="password" />
+            {authError && <div className="modal-error">{authError}</div>}
+            <div className="modal-actions">
+              <button className="modal-button secondary" onClick={() => setAuthOpen(false)} disabled={authSubmitting}>
+                Cancel
+              </button>
+              <button className="modal-button primary" onClick={() => void startCallWithAuth()} disabled={authSubmitting}>
+                {authSubmitting ? 'Verifying…' : 'Start Call'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
