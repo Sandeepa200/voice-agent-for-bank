@@ -11,3 +11,4 @@ httpx
 pydantic
 python-multipart
 motor
+supabase

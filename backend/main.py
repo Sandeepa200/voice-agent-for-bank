@@ -26,36 +26,36 @@ from app.agent import app as agent_app
 from app.utils import transcribe_audio, synthesize_audio
 from app.tools import reset_verification, set_tool_flags, verify_identity_raw
 from app.agent import get_agent_config, update_agent_config
-from app.db import init_db, get_mongo_client, get_db
+from app.db import init_db
 from app.session_repo import (
-    append_turn as mongo_append_turn,
-    create_session as mongo_create_session,
-    get_session as mongo_get_session,
-    set_verification as mongo_set_verification,
-    set_customer_id as mongo_set_customer_id,
-    get_turns as mongo_get_turns,
-    list_sessions as mongo_list_sessions,
-    touch_session as mongo_touch_session,
+    append_turn,
+    create_session,
+    get_session,
+    set_verification,
+    set_customer_id,
+    get_turns,
+    list_sessions,
+    touch_session,
+    get_turn_count,
 )
 from app.config_repo import ensure_seed_data, get_env_config, list_environments, update_env_config
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
-def _has_valid_mongodb_uri() -> bool:
-    uri = (os.environ.get("MONGODB_URI") or "").strip()
-    return uri.startswith("mongodb://") or uri.startswith("mongodb+srv://")
+def _has_valid_db_uri() -> bool:
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_KEY")
+    return bool(url and key)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    if _has_valid_mongodb_uri():
+    if _has_valid_db_uri():
         await init_db()
         await ensure_seed_data()
         cfg = await get_env_config("dev")
         set_tool_flags(cfg.get("tool_flags") or {})
     yield
-    if _has_valid_mongodb_uri():
-        get_mongo_client().close()
 
 
 app = FastAPI(title="Bank ABC Voice Agent", lifespan=lifespan)
@@ -76,7 +76,7 @@ app.add_middleware(
 # WARNING: This resets on server restart and doesn't scale.
 # Use Redis for production.
 SESSIONS = {}
-USE_MONGO = _has_valid_mongodb_uri()
+USE_DB = _has_valid_db_uri()
 
 # Max audio size: 10MB
 MAX_FILE_SIZE = 10 * 1024 * 1024 
@@ -102,9 +102,9 @@ def _new_session(customer_id: str) -> str:
     return session_id
 
 
-async def _new_session_mongo(customer_id: str, env_key: str) -> str:
+async def _new_session_db(customer_id: str, env_key: str) -> str:
     session_id = str(uuid.uuid4())
-    await mongo_create_session(session_id=session_id, customer_id=customer_id, env_key=env_key)
+    await create_session(session_id=session_id, customer_id=customer_id, env_key=env_key)
     return session_id
 
 
@@ -168,23 +168,23 @@ def _extract_verify_success(tool_calls: list, messages: list) -> tuple[Optional[
 @app.post("/call/start")
 async def start_call(env_key: str = Form("dev")):
     customer_id = "guest"
-    session_id = await _new_session_mongo(customer_id, env_key) if USE_MONGO else _new_session(customer_id)
+    session_id = await _new_session_db(customer_id, env_key) if USE_DB else _new_session(customer_id)
     reset_verification(customer_id)
     greeting = "Hello, welcome to Bank ABC. How can I help you today?"
     audio_bytes = await synthesize_audio(greeting)
-    if USE_MONGO:
-        await mongo_set_verification(session_id, verified_identity=False, verification_attempts=0)
-        await mongo_append_turn(session_id=session_id, ts=time.time(), user_transcript=None, agent_response=greeting, tool_calls=[])
+    if USE_DB:
+        await set_verification(session_id, verified_identity=False, verification_attempts=0)
+        await append_turn(session_id=session_id, ts=time.time(), user_transcript=None, agent_response=greeting, tool_calls=[])
     return {"session_id": session_id, "agent_response": greeting, "audio_base64": _encode_audio(audio_bytes)}
 
 
 @app.post("/call/end")
 async def end_call(session_id: str = Form(...)):
-    if USE_MONGO:
-        session = await mongo_get_session(session_id)
+    if USE_DB:
+        session = await get_session(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        await mongo_touch_session(session_id, ended=True)
+        await touch_session(session_id, ended=True)
         reset_verification(session["customer_id"])
     else:
         session = SESSIONS.get(session_id)
@@ -194,8 +194,8 @@ async def end_call(session_id: str = Form(...)):
         reset_verification(session["customer_id"])
     closing = "Thanks for calling Bank ABC. Goodbye."
     audio_bytes = await synthesize_audio(closing)
-    if USE_MONGO:
-        await mongo_append_turn(session_id=session_id, ts=time.time(), user_transcript=None, agent_response=closing, tool_calls=[])
+    if USE_DB:
+        await append_turn(session_id=session_id, ts=time.time(), user_transcript=None, agent_response=closing, tool_calls=[])
     return {"agent_response": closing, "audio_base64": _encode_audio(audio_bytes)}
 
 
@@ -204,8 +204,8 @@ async def call_turn(
     audio: UploadFile = File(...),
     session_id: str = Form(...),
 ):
-    if USE_MONGO:
-        session = await mongo_get_session(session_id)
+    if USE_DB:
+        session = await get_session(session_id)
         if not session or session.get("ended"):
             raise HTTPException(status_code=404, detail="Session not found or ended")
     else:
@@ -232,8 +232,8 @@ async def call_turn(
                 status_code=400,
             )
 
-        if USE_MONGO:
-            turns = await mongo_get_turns(session_id)
+        if USE_DB:
+            turns = await get_turns(session_id)
             messages = []
             for t in turns:
                 if t.get("user_transcript"):
@@ -266,13 +266,13 @@ async def call_turn(
         tool_calls = _sanitize_tool_calls(all_tool_calls)
 
         now = time.time()
-        if USE_MONGO:
-            await mongo_append_turn(session_id=session_id, ts=now, user_transcript=user_text, agent_response=bot_response, tool_calls=tool_calls)
+        if USE_DB:
+            await append_turn(session_id=session_id, ts=now, user_transcript=user_text, agent_response=bot_response, tool_calls=tool_calls)
             if attempts_delta or verified_now:
                 next_attempts = int(session.get("verification_attempts") or 0) + int(attempts_delta)
-                await mongo_set_verification(session_id, verified_identity=bool(verified_now or session.get("verified_identity")), verification_attempts=next_attempts)
+                await set_verification(session_id, verified_identity=bool(verified_now or session.get("verified_identity")), verification_attempts=next_attempts)
             if verified_now and verified_customer_id:
-                await mongo_set_customer_id(session_id, customer_id=verified_customer_id)
+                await set_customer_id(session_id, customer_id=verified_customer_id)
         else:
             session["messages"] = result["messages"]
             session["updated_at"] = now
@@ -302,9 +302,9 @@ async def call_turn(
 
 
 @app.get("/sessions")
-async def list_sessions():
-    if USE_MONGO:
-        sessions = await mongo_list_sessions()
+async def list_sessions_endpoint():
+    if USE_DB:
+        sessions = await list_sessions()
         turns_counts = {}
         for s in sessions:
             turns_counts[s["session_id"]] = await get_turn_count(s["session_id"])
@@ -337,19 +337,13 @@ async def list_sessions():
     return {"sessions": items}
 
 
-async def get_turn_count(session_id: str) -> int:
-    if not USE_MONGO:
-        return len(SESSIONS.get(session_id, {}).get("turns") or [])
-    return await get_db()["call_turns"].count_documents({"session_id": session_id})
-
-
 @app.get("/sessions/{session_id}")
-async def get_session(session_id: str):
-    if USE_MONGO:
-        session = await mongo_get_session(session_id)
+async def get_session_endpoint(session_id: str):
+    if USE_DB:
+        session = await get_session(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        turns = await mongo_get_turns(session_id)
+        turns = await get_turns(session_id)
         return {
             "session_id": session["session_id"],
             "customer_id": session["customer_id"],
@@ -378,7 +372,7 @@ class AgentConfigUpdate(BaseModel):
 
 @app.get("/config")
 async def read_config():
-    if USE_MONGO:
+    if USE_DB:
         cfg = await get_env_config("dev")
         defaults = get_agent_config()
         return {
@@ -390,7 +384,7 @@ async def read_config():
 
 @app.put("/config")
 async def write_config(payload: AgentConfigUpdate):
-    if USE_MONGO:
+    if USE_DB:
         cfg = await update_env_config("dev", base_system_prompt=payload.base_system_prompt, router_prompt=payload.router_prompt)
         if cfg.get("base_system_prompt") is not None or cfg.get("router_prompt") is not None:
             update_agent_config(base_system_prompt=cfg.get("base_system_prompt"), router_prompt=cfg.get("router_prompt"))
@@ -408,14 +402,14 @@ class RoutingRulesUpdate(BaseModel):
 
 @app.get("/admin/environments")
 async def admin_list_environments():
-    if not USE_MONGO:
+    if not USE_DB:
         return {"environments": [{"key": "dev", "name": "Development"}]}
     return {"environments": await list_environments()}
 
 
 @app.get("/admin/config")
 async def admin_get_config(env: str = "dev"):
-    if not USE_MONGO:
+    if not USE_DB:
         return get_agent_config()
     cfg = await get_env_config(env)
     defaults = get_agent_config()
@@ -431,7 +425,7 @@ async def admin_get_config(env: str = "dev"):
 
 @app.put("/admin/config")
 async def admin_put_config(payload: AgentConfigUpdate, env: str = "dev"):
-    if not USE_MONGO:
+    if not USE_DB:
         return update_agent_config(base_system_prompt=payload.base_system_prompt, router_prompt=payload.router_prompt)
     cfg = await update_env_config(env, base_system_prompt=payload.base_system_prompt, router_prompt=payload.router_prompt)
     if env == "dev":
@@ -447,7 +441,7 @@ async def admin_put_config(payload: AgentConfigUpdate, env: str = "dev"):
 
 @app.get("/admin/tools")
 async def admin_get_tools(env: str = "dev"):
-    if not USE_MONGO:
+    if not USE_DB:
         return {"env_key": env, "tool_flags": {}}
     cfg = await get_env_config(env)
     return {"env_key": env, "tool_flags": cfg.get("tool_flags") or {}, "updated_at": cfg.get("updated_at")}
@@ -455,7 +449,7 @@ async def admin_get_tools(env: str = "dev"):
 
 @app.put("/admin/tools")
 async def admin_put_tools(payload: ToolsUpdate, env: str = "dev"):
-    if not USE_MONGO:
+    if not USE_DB:
         return {"env_key": env, "tool_flags": payload.tool_flags}
     cfg = await update_env_config(env, tool_flags=payload.tool_flags or {})
     if env == "dev":
@@ -465,7 +459,7 @@ async def admin_put_tools(payload: ToolsUpdate, env: str = "dev"):
 
 @app.get("/admin/routing")
 async def admin_get_routing(env: str = "dev"):
-    if not USE_MONGO:
+    if not USE_DB:
         return {"env_key": env, "routing_rules": {}}
     cfg = await get_env_config(env)
     return {"env_key": env, "routing_rules": cfg.get("routing_rules") or {}, "updated_at": cfg.get("updated_at")}
@@ -473,7 +467,7 @@ async def admin_get_routing(env: str = "dev"):
 
 @app.put("/admin/routing")
 async def admin_put_routing(payload: RoutingRulesUpdate, env: str = "dev"):
-    if not USE_MONGO:
+    if not USE_DB:
         return {"env_key": env, "routing_rules": payload.routing_rules}
     cfg = await update_env_config(env, routing_rules=payload.routing_rules or {})
     return {"env_key": env, "routing_rules": cfg.get("routing_rules") or {}, "updated_at": cfg.get("updated_at")}
@@ -482,8 +476,8 @@ async def admin_put_routing(payload: RoutingRulesUpdate, env: str = "dev"):
 
 @app.post("/chat")
 async def chat_endpoint(audio: UploadFile = File(...), customer_id: str = Form("user_123")):
-    session_id = await _new_session_mongo(customer_id, "dev") if USE_MONGO else _new_session(customer_id)
-    return {"session_id": session_id, **(await call_turn(audio=audio, session_id=session_id, customer_id=customer_id))}
+    session_id = await _new_session_db(customer_id, "dev") if USE_DB else _new_session(customer_id)
+    return {"session_id": session_id, **(await call_turn(audio=audio, session_id=session_id))}
 
 if __name__ == "__main__":
     import uvicorn
