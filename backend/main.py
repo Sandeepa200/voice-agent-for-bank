@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 # Import our modules
 from app.agent import app as agent_app
 from app.utils import transcribe_audio, synthesize_audio
-from app.tools import reset_verification, set_tool_flags, verify_identity_raw
+from app.tools import reset_verification, set_tool_flags, verify_identity_raw, set_verification_state
 from app.agent import get_agent_config, update_agent_config
 from app.db import init_db
 from app.session_repo import (
@@ -263,7 +263,7 @@ async def start_call(env_key: str = Form("dev")):
     if USE_DB:
         await set_verification(session_id, verified_identity=False, verification_attempts=0)
         await append_turn(session_id=session_id, ts=time.time(), user_transcript=None, agent_response=greeting, tool_calls=[])
-    return {"session_id": session_id, "agent_response": greeting, "audio_base64": _encode_audio(audio_bytes)}
+    return {"session_id": session_id, "agent_response": greeting, "audio_base64": _encode_audio(audio_bytes), "is_verified": False}
 
 
 @app.post("/call/end")
@@ -284,7 +284,7 @@ async def end_call(session_id: str = Form(...)):
     audio_bytes = await synthesize_audio(closing)
     if USE_DB:
         await append_turn(session_id=session_id, ts=time.time(), user_transcript=None, agent_response=closing, tool_calls=[])
-    return {"agent_response": closing, "audio_base64": _encode_audio(audio_bytes)}
+    return {"agent_response": closing, "audio_base64": _encode_audio(audio_bytes), "is_verified": False}
 
 
 @app.post("/call/turn")
@@ -302,6 +302,11 @@ async def call_turn(
         session = SESSIONS.get(session_id)
         if not session or session.get("ended"):
             raise HTTPException(status_code=404, detail="Session not found or ended")
+            
+    # Hydrate in-memory verification cache from persistent session state
+    current_customer_id = session.get("customer_id") or "guest"
+    is_verified_session = bool(session.get("verified_identity"))
+    set_verification_state(current_customer_id, is_verified_session)
 
     try:
         audio_content = await audio.read()
@@ -391,9 +396,16 @@ async def call_turn(
                 }
             )
 
+        # Determine final verification state to return to UI
+        final_is_verified = verified_now or is_verified_session
+        
         audio_bytes = await synthesize_audio(bot_response)
-        return {"user_transcript": user_text, "agent_response": bot_response, "audio_base64": _encode_audio(audio_bytes)}
-
+        return {
+            "user_transcript": user_text, 
+            "agent_response": bot_response, 
+            "audio_base64": _encode_audio(audio_bytes),
+            "is_verified": final_is_verified
+        }
     except HTTPException as he:
         raise he
     except Exception as e:

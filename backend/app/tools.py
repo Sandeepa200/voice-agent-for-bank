@@ -6,8 +6,7 @@ from typing import List, Dict, Optional
 
 from langchain_core.tools import tool
 
-VERIFICATION_TTL_SECONDS = 10 * 60
-_VERIFIED_UNTIL: Dict[str, float] = {}
+_VERIFIED_CUSTOMERS: set[str] = set()
 _TOOL_FLAGS: Dict[str, Dict] = {}
 
 
@@ -24,7 +23,15 @@ def _is_tool_enabled(name: str) -> bool:
 
 
 def reset_verification(customer_id: str) -> None:
-    _VERIFIED_UNTIL.pop(customer_id, None)
+    _VERIFIED_CUSTOMERS.discard(customer_id)
+
+
+def set_verification_state(customer_id: str, is_verified: bool) -> None:
+    """Manually hydrate verification state (e.g. from session persistence)."""
+    if is_verified:
+        _VERIFIED_CUSTOMERS.add(customer_id)
+    else:
+        _VERIFIED_CUSTOMERS.discard(customer_id)
 
 
 _WORD_TO_DIGIT = {
@@ -59,13 +66,7 @@ def _normalize_pin(pin: str) -> str:
 
 
 def _is_verified(customer_id: str) -> bool:
-    until = _VERIFIED_UNTIL.get(customer_id)
-    if not until:
-        return False
-    if time.time() > until:
-        _VERIFIED_UNTIL.pop(customer_id, None)
-        return False
-    return True
+    return customer_id in _VERIFIED_CUSTOMERS
 
 
 MOCK_DB: Dict[str, Dict] = {
@@ -119,23 +120,18 @@ def verify_identity_raw(customer_id: str, pin: str) -> bool:
         return False
     if customer["pin"] != normalized:
         return False
-    _VERIFIED_UNTIL[customer_id] = time.time() + VERIFICATION_TTL_SECONDS
+    _VERIFIED_CUSTOMERS.add(customer_id)
     return True
 
 
 @tool
 def get_verification_status(customer_id: str) -> Dict:
-    """Return verification status for the current session (verified + remaining TTL seconds)."""
+    """Return verification status for the current session."""
     if not _is_tool_enabled("get_verification_status"):
-        return {"verified": False, "expires_in_seconds": 0, "error": "tool_disabled"}
-    until = _VERIFIED_UNTIL.get(customer_id)
-    if not until:
-        return {"verified": False, "expires_in_seconds": 0}
-    remaining = int(max(0, until - time.time()))
-    if remaining <= 0:
-        _VERIFIED_UNTIL.pop(customer_id, None)
-        return {"verified": False, "expires_in_seconds": 0}
-    return {"verified": True, "expires_in_seconds": remaining}
+        return {"verified": False, "error": "tool_disabled"}
+    
+    is_ver = customer_id in _VERIFIED_CUSTOMERS
+    return {"verified": is_ver}
 
 
 @tool
