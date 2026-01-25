@@ -14,6 +14,7 @@ from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.tools import (
     verify_identity,
+    get_verification_status,
     get_account_balance,
     get_recent_transactions,
     block_card,
@@ -51,6 +52,7 @@ llm = ChatGroq(
 # Bind tools to the LLM
 tools = [
     verify_identity,
+    get_verification_status,
     get_account_balance,
     get_recent_transactions,
     block_card,
@@ -72,6 +74,8 @@ SECURITY & VERIFICATION PROTOCOL:
 4. NEVER reveal balances, transactions, statements, or profile details unless the tools return success (no error).
 5. Card blocking is irreversible: confirm reason AND get explicit confirmation before you call `block_card`.
 6. NEVER show tool call syntax in your reply. Do not write tool markup like `<function=...>` or JSON arguments. If you need missing info, ask the user instead.
+7. Before asking for a PIN, call `get_verification_status(customer_id)`. If it returns verified=true, DO NOT ask for PIN again for this call session.
+8. Do not repeatedly ask for PIN in a loop. If verification succeeded once in this call, proceed with the user's request.
 
 ROUTING:
 - You MUST pick exactly one flow label for the user's latest request:
@@ -86,6 +90,7 @@ ROUTING:
 STYLE:
 - Keep responses SHORT and CONVERSATIONAL (max 2 sentences). This is a voice call.
 - Ask for ONE missing detail at a time.
+- If the user's request is ambiguous (e.g., \"tell me about the data\"), ask a clarifying question instead of guessing.
 
 FLOW HANDLING:
 - card_atm_issues:

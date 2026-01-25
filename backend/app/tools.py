@@ -70,6 +70,19 @@ def verify_identity(customer_id: str, pin: str) -> bool:
 
 
 @tool
+def get_verification_status(customer_id: str) -> Dict:
+    """Return verification status for the current session (verified + remaining TTL seconds)."""
+    until = _VERIFIED_UNTIL.get(customer_id)
+    if not until:
+        return {"verified": False, "expires_in_seconds": 0}
+    remaining = int(max(0, until - time.time()))
+    if remaining <= 0:
+        _VERIFIED_UNTIL.pop(customer_id, None)
+        return {"verified": False, "expires_in_seconds": 0}
+    return {"verified": True, "expires_in_seconds": remaining}
+
+
+@tool
 def get_account_balance(customer_id: str) -> Dict:
     """Return the customer's account balance details (requires verification)."""
     if not _is_verified(customer_id):

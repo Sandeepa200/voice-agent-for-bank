@@ -21,74 +21,169 @@ function App() {
   const customerIdRef = useRef<string>('user_123');
   const callActiveRef = useRef(false);
 
-  const streamRef = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const rafIdRef = useRef<number | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
   const isPlayingRef = useRef(false);
-  const silenceSinceRef = useRef<number | null>(null);
-  const recordingStartRef = useRef<number | null>(null);
-  const resumeAtRef = useRef<number>(0);
+  const busyRef = useRef(false);
+  const vadRef = useRef<any>(null);
+  const vadStreamRef = useRef<MediaStream | null>(null);
+  const pendingAudioRef = useRef<Float32Array[]>([]);
+  const pendingTimerRef = useRef<number | null>(null);
 
-  const stopLoop = () => {
-    if (rafIdRef.current) {
-      cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = null;
+  const concatFloat32 = (chunks: Float32Array[]) => {
+    let total = 0;
+    for (const c of chunks) total += c.length;
+    const out = new Float32Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+      out.set(c, offset);
+      offset += c.length;
     }
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-    }
-    if (audioContextRef.current) {
-      audioContextRef.current.close().catch(() => undefined);
-      audioContextRef.current = null;
-    }
-    analyserRef.current = null;
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
-    setIsListening(false);
+    return out;
   };
 
-  const pauseCapture = () => {
-    if (rafIdRef.current) {
-      cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = null;
+  const float32ToWavBlob = (audio: Float32Array, sampleRate: number) => {
+    const numChannels = 1;
+    const bytesPerSample = 2;
+    const blockAlign = numChannels * bytesPerSample;
+    const byteRate = sampleRate * blockAlign;
+    const dataSize = audio.length * bytesPerSample;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+
+    const writeString = (offset: number, s: string) => {
+      for (let i = 0; i < s.length; i += 1) view.setUint8(offset + i, s.charCodeAt(i));
+    };
+
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, 16, true);
+    writeString(36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    let offset = 44;
+    for (let i = 0; i < audio.length; i += 1) {
+      const s = Math.max(-1, Math.min(1, audio[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      offset += 2;
     }
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
+
+    return new Blob([buffer], { type: 'audio/wav' });
+  };
+
+  const stopCapture = async () => {
+    if (pendingTimerRef.current) {
+      window.clearTimeout(pendingTimerRef.current);
+      pendingTimerRef.current = null;
     }
-    if (audioContextRef.current) {
-      audioContextRef.current.close().catch(() => undefined);
-      audioContextRef.current = null;
-    }
-    analyserRef.current = null;
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
+    pendingAudioRef.current = [];
     setIsListening(false);
+    try {
+      if (vadRef.current?.pause) await vadRef.current.pause();
+    } catch (_e) {
+      undefined;
+    }
+    try {
+      if (vadRef.current?.destroy) await vadRef.current.destroy();
+    } catch (_e) {
+      undefined;
+    }
+    vadRef.current = null;
+    if (vadStreamRef.current) {
+      vadStreamRef.current.getTracks().forEach((t) => t.stop());
+      vadStreamRef.current = null;
+    }
+  };
+
+  const ensureVad = () => {
+    const v = (window as any).vad;
+    if (!v?.MicVAD?.new) throw new Error('VAD not loaded');
+    return v;
+  };
+
+  const startCapture = async () => {
+    if (vadRef.current) return;
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    vadStreamRef.current = stream;
+    const v = ensureVad();
+    vadRef.current = await v.MicVAD.new({
+      stream,
+      onSpeechStart: () => {
+        setIsListening(true);
+      },
+      onSpeechEnd: (audio: Float32Array) => {
+        setIsListening(false);
+        if (!callActiveRef.current) return;
+        if (busyRef.current) return;
+        pendingAudioRef.current.push(audio);
+        if (pendingTimerRef.current) window.clearTimeout(pendingTimerRef.current);
+        pendingTimerRef.current = window.setTimeout(async () => {
+          pendingTimerRef.current = null;
+          if (!callActiveRef.current) return;
+          if (busyRef.current) {
+            pendingAudioRef.current = [];
+            return;
+          }
+          const merged = concatFloat32(pendingAudioRef.current);
+          pendingAudioRef.current = [];
+          if (merged.length < 1600) return;
+          const wav = float32ToWavBlob(merged, 16000);
+          await sendTurn(wav);
+        }, 250);
+      },
+    });
+  };
+
+  const pauseCapture = async () => {
+    if (pendingTimerRef.current) {
+      window.clearTimeout(pendingTimerRef.current);
+      pendingTimerRef.current = null;
+    }
+    pendingAudioRef.current = [];
+    setIsListening(false);
+    try {
+      if (vadRef.current?.pause) await vadRef.current.pause();
+    } catch (_e) {
+      undefined;
+    }
+  };
+
+  const resumeCapture = async () => {
+    if (!callActiveRef.current) return;
+    if (!vadRef.current) {
+      await startCapture();
+      return;
+    }
+    try {
+      if (vadRef.current?.start) await vadRef.current.start();
+    } catch (_e) {
+      undefined;
+    }
   };
 
   useEffect(() => {
     return () => {
-      stopLoop();
+      void stopCapture();
     };
   }, []);
-
-  const resumeCapture = async () => {
-    if (!callActiveRef.current) return;
-    if (rafIdRef.current) return;
-    resumeAtRef.current = Date.now() + 600;
-    await startVadLoop();
-  };
 
   const playAudioResponse = async (base64Audio: string | null) => {
     if (!base64Audio) return;
     isPlayingRef.current = true;
-    pauseCapture();
+    busyRef.current = true;
+    await pauseCapture();
     try {
       const audio = new Audio(`data:audio/mp3;base64,${base64Audio}`);
       await new Promise<void>((resolve) => {
@@ -98,6 +193,7 @@ function App() {
       });
     } finally {
       isPlayingRef.current = false;
+      busyRef.current = false;
     }
     await resumeCapture();
   };
@@ -105,9 +201,10 @@ function App() {
   const sendTurn = async (audioBlob: Blob) => {
     if (!sessionIdRef.current) return;
     setIsLoading(true);
+    busyRef.current = true;
     try {
       const formData = new FormData();
-      formData.append('audio', audioBlob, 'utterance.webm');
+      formData.append('audio', audioBlob, 'utterance.wav');
       formData.append('session_id', sessionIdRef.current);
       formData.append('customer_id', customerIdRef.current);
 
@@ -125,91 +222,8 @@ function App() {
       await playAudioResponse(audio_base64);
     } finally {
       setIsLoading(false);
+      busyRef.current = false;
     }
-  };
-
-  const startVadLoop = async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
-    streamRef.current = stream;
-
-    const audioContext = new AudioContext();
-    audioContextRef.current = audioContext;
-    const source = audioContext.createMediaStreamSource(stream);
-    const analyser = audioContext.createAnalyser();
-    analyser.fftSize = 2048;
-    analyserRef.current = analyser;
-    source.connect(analyser);
-
-    const data = new Uint8Array(analyser.fftSize);
-    const startThreshold = 0.03;
-    const stopThreshold = 0.02;
-    const silenceMsToStop = 900;
-    const minRecordMs = 450;
-
-    const tick = () => {
-      const a = analyserRef.current;
-      if (!a) return;
-
-      a.getByteTimeDomainData(data);
-      let sumSquares = 0;
-      for (let i = 0; i < data.length; i += 1) {
-        const v = (data[i] - 128) / 128;
-        sumSquares += v * v;
-      }
-      const rms = Math.sqrt(sumSquares / data.length);
-
-      const now = Date.now();
-      const recorder = mediaRecorderRef.current;
-      const isRecordingNow = recorder?.state === 'recording';
-
-      if (!isPlayingRef.current && !isLoading && now >= resumeAtRef.current) {
-        if (!isRecordingNow && rms > startThreshold) {
-          silenceSinceRef.current = null;
-          recordingStartRef.current = now;
-          chunksRef.current = [];
-          const mr = new MediaRecorder(streamRef.current!);
-          mediaRecorderRef.current = mr;
-          mr.ondataavailable = (e) => {
-            if (e.data.size > 0) chunksRef.current.push(e.data);
-          };
-          mr.onstop = async () => {
-            const start = recordingStartRef.current;
-            recordingStartRef.current = null;
-            const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-            chunksRef.current = [];
-            if (!start) return;
-            if (Date.now() - start < minRecordMs) return;
-            if (blob.size < 1024) return;
-            await sendTurn(blob);
-          };
-          mr.start();
-          setIsListening(true);
-        }
-
-        if (isRecordingNow) {
-          if (rms < stopThreshold) {
-            if (!silenceSinceRef.current) silenceSinceRef.current = now;
-            if (now - silenceSinceRef.current > silenceMsToStop) {
-              silenceSinceRef.current = null;
-              recorder?.stop();
-              setIsListening(false);
-            }
-          } else {
-            silenceSinceRef.current = null;
-          }
-        }
-      }
-
-      rafIdRef.current = requestAnimationFrame(tick);
-    };
-
-    rafIdRef.current = requestAnimationFrame(tick);
   };
 
   const startCall = async () => {
@@ -232,13 +246,14 @@ function App() {
       callActiveRef.current = true;
       setMessages([{ role: 'agent', text: agent_response }]);
       await playAudioResponse(audio_base64);
+      await startCapture();
       setCallStatus('in_call');
     } catch (error) {
       console.error(error);
       alert('Could not start the call. Check microphone permissions and backend status.');
       setCallStatus('idle');
       callActiveRef.current = false;
-      stopLoop();
+      void stopCapture();
     }
   };
 
@@ -246,12 +261,12 @@ function App() {
     if (!sessionIdRef.current) {
       setCallStatus('idle');
       callActiveRef.current = false;
-      stopLoop();
+      void stopCapture();
       return;
     }
     setCallStatus('ending');
     callActiveRef.current = false;
-    stopLoop();
+    void stopCapture();
     try {
       const formData = new FormData();
       formData.append('session_id', sessionIdRef.current);

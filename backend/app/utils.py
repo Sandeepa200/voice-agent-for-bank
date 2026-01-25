@@ -12,10 +12,16 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
     Transcribes audio using Groq's Distil-Whisper model.
     """
     try:
-        # Groq client expects a file-like object or tuple (filename, bytes)
-        # We pass a tuple to simulate a file upload
+        filename = "audio"
+        if audio_bytes[:4] == b"RIFF" and audio_bytes[8:12] == b"WAVE":
+            filename = "audio.wav"
+        elif audio_bytes[:4] == b"\x1aE\xdf\xa3":
+            filename = "audio.webm"
+        elif audio_bytes[:3] == b"ID3":
+            filename = "audio.mp3"
+
         transcription = groq_client.audio.transcriptions.create(
-            file=("audio.webm", audio_bytes), 
+            file=(filename, audio_bytes),
             model="whisper-large-v3",
             response_format="json",
             language="en",
