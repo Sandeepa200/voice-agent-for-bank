@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 import os
+import sys
 from pathlib import Path
 import base64
 import json
@@ -13,6 +14,10 @@ import re
 # Explicitly point to the .env file in the backend directory
 env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
+
+# Ensure backend directory is in sys.path so 'app' package can be imported
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 if os.environ.get("LANGCHAIN_API_KEY") or os.environ.get("LANGSMITH_API_KEY"):
     os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
