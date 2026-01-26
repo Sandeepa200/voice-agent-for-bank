@@ -59,6 +59,15 @@ function App() {
   const vadStreamRef = useRef<MediaStream | null>(null);
   const pendingAudioRef = useRef<Float32Array[]>([]);
   const pendingTimerRef = useRef<number | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, isLoading]);
 
   const concatFloat32 = (chunks: Float32Array[]) => {
     let total = 0;
@@ -554,6 +563,7 @@ function App() {
                 </div>
               </div>
             )}
+            <div ref={messagesEndRef} />
           </div>
 
           <div className="controls">

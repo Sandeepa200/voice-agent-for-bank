@@ -14,9 +14,9 @@ This repo deploys as a single Vercel project (one domain):
    - `GROQ_API_KEY`
    - `DEEPGRAM_API_KEY`
    - `LANGCHAIN_API_KEY` (optional but recommended for tracing)
-   - MongoDB:
-     - `MONGODB_URI`
-     - `MONGODB_DB_NAME`
+   - Supabase:
+     - `SUPABASE_URL`
+     - `SUPABASE_SERVICE_KEY`
 3. Install Python deps:
    - `python -m pip install -r backend/requirements.txt`
 4. Run the API:
@@ -34,11 +34,18 @@ This repo deploys as a single Vercel project (one domain):
 
 Open the UI from the Vite URL (usually `http://localhost:5173`).
 
-## MongoDB env variables
+## Supabase Database Setup
 
-Add these to `backend/.env` locally, and to Vercel Environment Variables when deploying:
-- `MONGODB_URI` (Atlas SRV format): `mongodb+srv://<user>:<password>@<cluster-host>/<db>?retryWrites=true&w=majority`
-- `MONGODB_DB_NAME` (optional): `bank_abc_voice_agent`
+1. Create a new Supabase project.
+2. Run the SQL migrations in `supabase/migrations/` to set up the `call_sessions` and `call_turns` tables.
+3. Get your Project URL and Service Role Key (Settings -> API) and add them to your `.env` file.
+
+## Test Credentials
+
+Use these credentials to test the "Deep Logic" flows (e.g., "Check Balance", "Block Card"):
+
+- **Customer ID**: `user123`
+- **PIN**: `1234`
 
 ## Admin dashboard
 
