@@ -6,7 +6,9 @@ from typing import List, Dict, Optional
 
 from langchain_core.tools import tool
 
-_VERIFIED_CUSTOMERS: set[str] = set()
+from contextvars import ContextVar
+
+_VERIFIED_CUSTOMERS_CTX: ContextVar[frozenset[str]] = ContextVar("verified_customers", default=frozenset())
 _TOOL_FLAGS: Dict[str, Dict] = {}
 
 
@@ -23,50 +25,23 @@ def _is_tool_enabled(name: str) -> bool:
 
 
 def reset_verification(customer_id: str) -> None:
-    _VERIFIED_CUSTOMERS.discard(customer_id)
+    current = _VERIFIED_CUSTOMERS_CTX.get()
+    if customer_id in current:
+        _VERIFIED_CUSTOMERS_CTX.set(current - {customer_id})
 
 
 def set_verification_state(customer_id: str, is_verified: bool) -> None:
     """Manually hydrate verification state (e.g. from session persistence)."""
+    current = _VERIFIED_CUSTOMERS_CTX.get()
     if is_verified:
-        _VERIFIED_CUSTOMERS.add(customer_id)
+        _VERIFIED_CUSTOMERS_CTX.set(current | {customer_id})
     else:
-        _VERIFIED_CUSTOMERS.discard(customer_id)
-
-
-_WORD_TO_DIGIT = {
-    "zero": "0",
-    "oh": "0",
-    "one": "1",
-    "two": "2",
-    "three": "3",
-    "four": "4",
-    "five": "5",
-    "six": "6",
-    "seven": "7",
-    "eight": "8",
-    "nine": "9",
-}
-
-
-def _normalize_pin(pin: str) -> str:
-    s = (pin or "").strip().lower()
-    if not s:
-        return ""
-    tokens = re.findall(r"[a-z]+|\d+", s)
-    digits: list[str] = []
-    for t in tokens:
-        if t.isdigit():
-            digits.extend(list(t))
-            continue
-        d = _WORD_TO_DIGIT.get(t)
-        if d is not None:
-            digits.append(d)
-    return "".join(digits)
+        if customer_id in current:
+            _VERIFIED_CUSTOMERS_CTX.set(current - {customer_id})
 
 
 def _is_verified(customer_id: str) -> bool:
-    return customer_id in _VERIFIED_CUSTOMERS
+    return customer_id in _VERIFIED_CUSTOMERS_CTX.get()
 
 
 MOCK_DB: Dict[str, Dict] = {
@@ -115,12 +90,14 @@ def verify_identity_raw(customer_id: str, pin: str) -> bool:
     customer = MOCK_DB["customers"].get(customer_id)
     if not customer:
         return False
-    normalized = _normalize_pin(pin)
+    # Simple whitespace stripping only - assuming reliable STT or numeric input
+    normalized = (pin or "").strip()
     if len(normalized) < 4 or len(normalized) > 6:
         return False
     if customer["pin"] != normalized:
         return False
-    _VERIFIED_CUSTOMERS.add(customer_id)
+    current = _VERIFIED_CUSTOMERS_CTX.get()
+    _VERIFIED_CUSTOMERS_CTX.set(current | {customer_id})
     return True
 
 
@@ -130,7 +107,7 @@ def get_verification_status(customer_id: str) -> Dict:
     if not _is_tool_enabled("get_verification_status"):
         return {"verified": False, "error": "tool_disabled"}
     
-    is_ver = customer_id in _VERIFIED_CUSTOMERS
+    is_ver = _is_verified(customer_id)
     return {"verified": is_ver}
 
 
