@@ -165,9 +165,20 @@ FLOW PLAYBOOKS (KEEP IT BRIEF):
 
 """
 
-ROUTER_PROMPT = """Classify the user's latest request into exactly one flow label from:
+ROUTER_PROMPT = """You are a classification agent.
+Current Conversation Flow: {current_flow}
+
+User's latest message: "{last_user_message}"
+
+Task:
+1. If the user is providing information (like ID, PIN, Name), confirming something ("yes", "ok", "thank you"), or continuing the current conversation, KEEP the current flow: {current_flow}.
+2. ONLY if the user explicitly asks for a DIFFERENT topic, return the new flow label.
+3. If there is no current flow (None/empty), classify based on the message.
+
+Available Flows:
 card_atm_issues, account_servicing, account_opening, digital_app_support, transfers_and_bill_payments, account_closure_retention.
-Return ONLY the label, no extra text."""
+
+Return ONLY the flow label. No extra text."""
 
 AGENT_CONFIG = {
     "base_system_prompt": BASE_SYSTEM_PROMPT,
@@ -198,11 +209,20 @@ def router(state: AgentState):
             last_user_text = m[1]
             break
 
+    current_flow = state.get("flow") or "None"
     router_prompt = AGENT_CONFIG["router_prompt"]
     try:
-        router_prompt = router_prompt.format(last_user_message=last_user_text or "")
+        router_prompt = router_prompt.format(
+            last_user_message=last_user_text or "",
+            current_flow=current_flow
+        )
     except Exception:
-        pass
+        # Fallback in case template keys don't match
+        try:
+             router_prompt = router_prompt.format(last_user_message=last_user_text or "")
+        except:
+             pass
+
     resp = _invoke_llm_with_fallback(
         system_prompt=router_prompt,
         messages=[HumanMessage(content=last_user_text or "")],
@@ -217,7 +237,17 @@ def router(state: AgentState):
         "transfers_and_bill_payments",
         "account_closure_retention",
     }
-    flow: FlowName = label if label in allowed else "account_servicing"
+    
+    # If the label is not allowed, check if we should keep the current flow
+    if label not in allowed:
+        # If current_flow is valid, fallback to it
+        if current_flow in allowed:
+            flow = current_flow
+        else:
+            flow = "account_servicing"
+    else:
+        flow = label
+        
     return {"flow": flow}
 
 
