@@ -78,23 +78,23 @@ graph TD
 ### Phase 1: Setup & Configuration (Done)
 - [x] Create Project Structure
 - [x] Create Virtual Environment
-- [ ] Install Dependencies (`requirements.txt`)
-- [ ] Configure `.env` keys
+- [x] Install Dependencies (`requirements.txt`)
+- [x] Configure `.env` keys
 
-### Phase 2: Core Backend Logic (High Priority)
-- [ ] **Step 1**: Implement `app/tools.py` (Mock Banking API).
-- [ ] **Step 2**: Implement `app/agent.py` (LangGraph with Llama-3.3-70b).
-- [ ] **Step 3**: Test Agent logic in isolation (Text-only).
+### Phase 2: Core Backend Logic (Done)
+- [x] **Step 1**: Implement `app/tools.py` (Mock Banking API).
+- [x] **Step 2**: Implement `app/agent.py` (LangGraph with Llama-3.3-70b).
+- [x] **Step 3**: Test Agent logic in isolation (Text-only).
 
-### Phase 3: Voice Integration
-- [ ] **Step 4**: Implement `transcribe` using Groq.
-- [ ] **Step 5**: Implement `synthesize` using Deepgram.
-- [ ] **Step 6**: Create `POST /chat` endpoint in `main.py` to glue it all together.
+### Phase 3: Voice Integration (Done)
+- [x] **Step 4**: Implement `transcribe` using Groq.
+- [x] **Step 5**: Implement `synthesize` using Deepgram.
+- [x] **Step 6**: Create `POST /chat` endpoint in `main.py` to glue it all together.
 
-### Phase 4: Frontend & Polish
-- [ ] **Step 7**: Build React UI (Record Button + Chat List).
-- [ ] **Step 8**: Connect Frontend to Backend.
-- [ ] **Step 9**: End-to-End Testing (Simulate "Lost Card" flow).
+### Phase 4: Frontend & Polish (Done)
+- [x] **Step 7**: Build React UI (Record Button + Chat List).
+- [x] **Step 8**: Connect Frontend to Backend.
+- [x] **Step 9**: End-to-End Testing (Simulate "Lost Card" flow).
 
 ## 7. Security & Guardrails
 *   **Identity First**: The Agent System Prompt will strictly enforce `verify_identity` before calling `get_balance`.
