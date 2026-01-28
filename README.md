@@ -1,59 +1,118 @@
 # Bank ABC Voice Agent (POC)
 
 This repo deploys as a single Vercel project (one domain):
-- Frontend is built as static files into `public/`
-- Backend is a FastAPI app exported from `index.py`
+- **Frontend**: React (Vite) built as static files.
+- **Backend**: Python (FastAPI) serverless functions.
 
-## Local setup
+## 🚀 Live Demo
+- **Frontend App**: [https://voice-agent-for-bank.vercel.app](https://voice-agent-for-bank.vercel.app)
+- **API Base URL**: `https://voice-agent-for-bank.vercel.app/api`
 
-### 1) Backend (FastAPI)
-
-1. Create your local env file:
-   - Copy `backend/.env.example` → `backend/.env`
-2. Fill in required keys in `backend/.env`:
-   - `GROQ_API_KEY`
-   - `DEEPGRAM_API_KEY`
-   - `LANGCHAIN_API_KEY` (optional but recommended for tracing)
-   - Supabase:
-     - `SUPABASE_URL`
-     - `SUPABASE_SERVICE_KEY`
-3. Install Python deps:
-   - `python -m pip install -r backend/requirements.txt`
-4. Run the API:
-   - `python -m uvicorn main:app --host 0.0.0.0 --port 8000`
-
-### 2) Frontend (Vite)
-
-1. Install deps:
-   - `cd frontend`
-   - `npm ci`
-2. Configure API URL for local dev:
-   - `frontend/.env` should contain: `VITE_API_URL=http://localhost:8000`
-3. Run dev server:
-   - `npm run dev`
-
-Open the UI from the Vite URL (usually `http://localhost:5173`).
-
-## Supabase Database Setup
-
-1. Create a new Supabase project.
-2. Run the SQL migrations in `supabase/migrations/` to set up the `call_sessions` and `call_turns` tables.
-3. Get your Project URL and Service Role Key (Settings -> API) and add them to your `.env` file.
-
-## Test Credentials
-
-Use these credentials to test the "Deep Logic" flows (e.g., "Check Balance", "Block Card"):
-
+## 🔑 Test Credentials
+Use these credentials to verify identity and access protected flows (e.g., "Check Balance", "Block Card"):
 - **Customer ID**: `user123`
 - **PIN**: `1234`
 
-## Admin dashboard
+## 🛠 Setup Instructions
 
-Use the **Admin** button in the main UI to edit:
-- Prompts (system + router)
-- Tool enable/disable flags
-- Routing rules JSON
+### Prerequisites
+- Python 3.9+
+- Node.js 18+
+- API Keys: Groq, Deepgram, LangChain (optional)
 
-## Notes
+### 1. Backend (FastAPI)
+1. Navigate to `backend/`:
+   ```bash
+   cd backend
+   ```
+2. Create virtual environment and install dependencies:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # or venv\Scripts\activate on Windows
+   pip install -r requirements.txt
+   ```
+3. Create `.env` file:
+   ```bash
+   cp .env.example .env
+   ```
+   Add your keys: `GROQ_API_KEY`, `DEEPGRAM_API_KEY`.
+4. Run locally:
+   ```bash
+   python main.py
+   # Runs on http://localhost:8000
+   ```
 
-- The call flow asks for Customer ID + PIN before starting the call. PIN is never stored.
+### 2. Frontend (React + Vite)
+1. Navigate to `frontend/`:
+   ```bash
+   cd frontend
+   ```
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Configure environment:
+   Create `.env` with:
+   ```
+   VITE_API_URL=http://localhost:8000
+   ```
+4. Run locally:
+   ```bash
+   npm run dev
+   # Runs on http://localhost:5173
+   ```
+
+## 🎮 How to Demo (End-to-End)
+1. Open the **Frontend App** (Local or Live).
+2. Click the **Start Call** button (allow microphone access).
+3. **Scenario 1: General Inquiry**
+   - Say: *"What are your operating hours?"*
+   - Expected: Agent answers without asking for ID.
+4. **Scenario 2: Secure Banking (Happy Path)**
+   - Say: *"What is my checking account balance?"*
+   - Agent: *"I can help with that. What is your Customer ID?"*
+   - Say: *"user123"*
+   - Agent: *"Please share your PIN to verify your identity."*
+   - Say: *"1234"* (or *"one two three four"*)
+   - Agent: *"Thank you. Your checking account balance is $5,000.00."*
+5. **Scenario 3: Guardrails**
+   - Say: *"Block my card."*
+   - Agent should ask for verification first (if not already verified) and confirm the reason.
+
+## 🛡️ Resiliency & Rate Limiting
+
+To handle Groq's free tier rate limits (429 Errors), the backend implements an **Automatic Model Switching** mechanism:
+
+1.  **Primary Model**: `llama-3.3-70b-versatile` (Best performance).
+2.  **Fallbacks**: If the primary model is rate-limited, the system automatically retries with:
+    - `llama-3.1-8b-instant` (Fastest, lower reasoning).
+    - `llama-3.1-70b-versatile`
+    - `gemma2-9b-it`
+    - `mixtral-8x7b-32768`
+3.  **Configurable**: You can customize the fallback order via the `GROQ_MODEL_FALLBACKS` environment variable.
+
+## ⚖️ Trade-offs & Assumptions
+
+### Architecture Trade-offs
+1.  **Latency vs. Simplicity**:
+    *   *Current*: **Turn-based HTTP** (Audio Upload -> Transcribe -> LLM -> TTS -> Audio Download).
+    *   *Trade-off*: Simpler to implement and debug, but higher latency (2-4s) compared to full-duplex WebSocket streaming.
+2.  **State Management**:
+    *   *Current*: **In-Memory / Optional DB**.
+    *   *Trade-off*: In-memory is fast for demos but state is lost on serverless cold starts. Supabase integration is added for persistence but adds a network hop.
+3.  **Voice Activity Detection (VAD)**:
+    *   *Current*: **Client-side VAD** (ONNX).
+    *   *Trade-off*: Reduces server load and bandwidth, but relies on client device performance.
+
+### Assumptions
+- **Language**: English only.
+- **Security**:
+    - "Authentication" is a mock check against a static dictionary. **NOT** for production use.
+    - PINs are transmitted as part of the conversation transcript (in a real app, this would be out-of-band or DTMF).
+- **Environment**:
+    - Browser must support MediaRecorder API.
+    - Rate limits apply to Groq and Deepgram free tiers.
+
+## 📝 Environment Notes
+- **Rate Limits**: The demo uses free/tier-limited keys for Groq and Deepgram. Excessive usage may result in 429 errors.
+- **Cold Starts**: On Vercel, the first request might take a few extra seconds to spin up the Python function.
