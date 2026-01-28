@@ -6,9 +6,7 @@ from typing import List, Dict, Optional
 
 from langchain_core.tools import tool
 
-from contextvars import ContextVar
-
-_VERIFIED_CUSTOMERS_CTX: ContextVar[frozenset[str]] = ContextVar("verified_customers", default=frozenset())
+_VERIFIED_CUSTOMERS: set[str] = set()
 _TOOL_FLAGS: Dict[str, Dict] = {}
 
 
@@ -26,9 +24,8 @@ def _is_tool_enabled(name: str) -> bool:
 
 def reset_verification(customer_id: str) -> None:
     normalized_id = _normalize_customer_id(customer_id) if customer_id else ""
-    current = _VERIFIED_CUSTOMERS_CTX.get()
-    if normalized_id and normalized_id in current:
-        _VERIFIED_CUSTOMERS_CTX.set(current - {normalized_id})
+    if normalized_id and normalized_id in _VERIFIED_CUSTOMERS:
+        _VERIFIED_CUSTOMERS.discard(normalized_id)
 
 
 def set_verification_state(customer_id: str, is_verified: bool) -> None:
@@ -36,24 +33,21 @@ def set_verification_state(customer_id: str, is_verified: bool) -> None:
     normalized_id = _normalize_customer_id(customer_id) if customer_id else ""
     if not normalized_id:
         return
-    current = _VERIFIED_CUSTOMERS_CTX.get()
     if is_verified:
-        _VERIFIED_CUSTOMERS_CTX.set(current | {normalized_id})
+        _VERIFIED_CUSTOMERS.add(normalized_id)
     else:
-        if normalized_id in current:
-            _VERIFIED_CUSTOMERS_CTX.set(current - {normalized_id})
+        _VERIFIED_CUSTOMERS.discard(normalized_id)
 
 
 def _is_verified(customer_id: str) -> bool:
     if not customer_id:
         return False
     # Check exact match first
-    current = _VERIFIED_CUSTOMERS_CTX.get()
-    if customer_id in current:
+    if customer_id in _VERIFIED_CUSTOMERS:
         return True
     # Check case-insensitive
     customer_lower = customer_id.lower()
-    for verified_id in current:
+    for verified_id in _VERIFIED_CUSTOMERS:
         if verified_id.lower() == customer_lower:
             return True
     return False
@@ -163,8 +157,7 @@ def verify_identity_raw(customer_id: str, pin: str) -> bool:
         return False
 
     # Store the actual key from MOCK_DB for consistent verification checks
-    current = _VERIFIED_CUSTOMERS_CTX.get()
-    _VERIFIED_CUSTOMERS_CTX.set(current | {found_key})
+    _VERIFIED_CUSTOMERS.add(found_key)
     return True
 
 
