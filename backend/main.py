@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 import os
+import sys
 from pathlib import Path
 import base64
 import json
@@ -13,6 +14,10 @@ import re
 # Explicitly point to the .env file in the backend directory
 env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
+
+# Ensure backend directory is in sys.path so 'app' package can be imported
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 if os.environ.get("LANGCHAIN_API_KEY") or os.environ.get("LANGSMITH_API_KEY"):
     os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
@@ -66,15 +71,20 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Bank ABC Voice Agent", lifespan=lifespan)
+app = FastAPI(title="Bank ABC Voice Agent", lifespan=lifespan, root_path=os.environ.get("VITE_API_URL", "/api"))
 
 
 
 # CORS Configuration
-# In production, replace ["*"] with ["https://your-frontend.vercel.app"]
+# Allow all origins locally. On Vercel, trust the Vercel URL.
+origins = ["*"]
+vercel_url = os.environ.get("VERCEL_URL")
+if vercel_url:
+    origins = [f"https://{vercel_url}"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=origins, 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -180,60 +190,6 @@ def _extract_verify_success(tool_calls: list, messages: list) -> tuple[Optional[
                         break
             break
     return verified_customer_id, attempts, verified
-
-
-def _tool_succeeded(messages: list, tool_name: str) -> bool:
-    for m in messages or []:
-        if getattr(m, "type", None) != "tool":
-            continue
-        if getattr(m, "name", None) != tool_name:
-            continue
-        content = getattr(m, "content", None)
-        if content is None:
-            return False
-        s = str(content).strip()
-        if not s:
-            return False
-        try:
-            parsed = json.loads(s)
-            if isinstance(parsed, dict):
-                return "error" not in parsed
-            if isinstance(parsed, list):
-                for item in parsed:
-                    if isinstance(item, dict) and "error" in item:
-                        return False
-                return True
-        except Exception:
-            lowered = s.lower()
-            if "identity_not_verified" in lowered or "customer_not_found" in lowered or "tool_disabled" in lowered:
-                return False
-            if lowered.startswith("error"):
-                return False
-        return True
-    return False
-
-
-def _verification_prompt(customer_id: str) -> str:
-    cid = (customer_id or "").strip().lower()
-    if not cid or cid == "guest":
-        return "I can help with that. What’s your Customer ID?"
-    return "I can help with that. Please share your 4–6 digit PIN to verify your identity."
-
-
-def _apply_sensitive_guardrail(*, agent_text: str, messages: list, customer_id: str) -> str:
-    text = (agent_text or "").strip()
-    if not text:
-        return text
-    lowered = text.lower()
-
-    reveals_balance = bool(re.search(r"\$\s*\d", text)) or ("balance" in lowered and re.search(r"\d", text))
-    reveals_contact = ("email" in lowered and "@" in text) or ("phone" in lowered and re.search(r"\+?\d", text)) or ("your name is" in lowered)
-
-    if reveals_balance and not _tool_succeeded(messages, "get_account_balance"):
-        return _verification_prompt(customer_id)
-    if reveals_contact and not _tool_succeeded(messages, "get_customer_profile"):
-        return _verification_prompt(customer_id)
-    return text
 
 
 def _is_rate_limited_error(exc: Exception) -> bool:
@@ -368,7 +324,6 @@ async def call_turn(
                 all_tool_calls.extend(tcs)
         verified_customer_id, attempts_delta, verified_now = _extract_verify_success(all_tool_calls, result.get("messages") or [])
         tool_calls = _sanitize_tool_calls(all_tool_calls)
-        bot_response = _apply_sensitive_guardrail(agent_text=bot_response, messages=result.get("messages") or [], customer_id=current_customer_id)
 
         now = time.time()
         if USE_DB:
@@ -587,7 +542,7 @@ async def admin_put_routing(payload: RoutingRulesUpdate, env: str = "dev"):
 
 
 @app.post("/chat")
-async def chat_endpoint(audio: UploadFile = File(...), customer_id: str = Form("user123")):
+async def chat_endpoint(audio: UploadFile = File(...), customer_id: str = Form("John123")):
     session_id = await _new_session_db(customer_id, "dev") if USE_DB else _new_session(customer_id)
     return {"session_id": session_id, **(await call_turn(audio=audio, session_id=session_id))}
 
