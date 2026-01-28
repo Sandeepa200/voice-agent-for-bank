@@ -6,9 +6,7 @@ from typing import List, Dict, Optional
 
 from langchain_core.tools import tool
 
-from contextvars import ContextVar
-
-_VERIFIED_CUSTOMERS_CTX: ContextVar[frozenset[str]] = ContextVar("verified_customers", default=frozenset())
+_VERIFIED_CUSTOMERS: set[str] = set()
 _TOOL_FLAGS: Dict[str, Dict] = {}
 
 
@@ -25,28 +23,87 @@ def _is_tool_enabled(name: str) -> bool:
 
 
 def reset_verification(customer_id: str) -> None:
-    current = _VERIFIED_CUSTOMERS_CTX.get()
-    if customer_id in current:
-        _VERIFIED_CUSTOMERS_CTX.set(current - {customer_id})
+    normalized_id = _normalize_customer_id(customer_id) if customer_id else ""
+    if normalized_id and normalized_id in _VERIFIED_CUSTOMERS:
+        _VERIFIED_CUSTOMERS.discard(normalized_id)
 
 
 def set_verification_state(customer_id: str, is_verified: bool) -> None:
     """Manually hydrate verification state (e.g. from session persistence)."""
-    current = _VERIFIED_CUSTOMERS_CTX.get()
+    normalized_id = _normalize_customer_id(customer_id) if customer_id else ""
+    if not normalized_id:
+        return
     if is_verified:
-        _VERIFIED_CUSTOMERS_CTX.set(current | {customer_id})
+        _VERIFIED_CUSTOMERS.add(normalized_id)
     else:
-        if customer_id in current:
-            _VERIFIED_CUSTOMERS_CTX.set(current - {customer_id})
+        _VERIFIED_CUSTOMERS.discard(normalized_id)
 
 
 def _is_verified(customer_id: str) -> bool:
-    return customer_id in _VERIFIED_CUSTOMERS_CTX.get()
+    if not customer_id:
+        return False
+    # Check exact match first
+    if customer_id in _VERIFIED_CUSTOMERS:
+        return True
+    # Check case-insensitive
+    customer_lower = customer_id.lower()
+    for verified_id in _VERIFIED_CUSTOMERS:
+        if verified_id.lower() == customer_lower:
+            return True
+    return False
+
+
+def _normalize_customer_id(customer_id: str) -> str:
+    """Normalize customer ID for voice transcription variations.
+
+    Handles: "John 123", "john-123", "John.123", "john, 123" -> "John123"
+    """
+    if not customer_id:
+        return ""
+    # Remove spaces, commas, dots, hyphens
+    cleaned = re.sub(r'[\s,.\-]+', '', customer_id.strip())
+    # Validate: only letters and numbers allowed
+    if not re.match(r'^[A-Za-z0-9]+$', cleaned):
+        return ""
+    return cleaned
+
+
+def _normalize_pin(pin: str) -> str:
+    """Normalize PIN for voice transcription variations.
+
+    Handles: "1 2 3 4", "1,2,3,4", "1.2.3.4", "1-2-3-4" -> "1234"
+    """
+    if not pin:
+        return ""
+    # Remove all non-digits
+    return re.sub(r'\D', '', pin)
+
+
+def _find_customer(customer_id: str) -> tuple[Optional[str], Optional[Dict]]:
+    """Find customer by ID with case-insensitive matching.
+
+    Returns (normalized_key, customer_data) or (None, None) if not found.
+    """
+    normalized = _normalize_customer_id(customer_id)
+    if not normalized:
+        return None, None
+
+    # Try exact match first
+    if normalized in MOCK_DB["customers"]:
+        return normalized, MOCK_DB["customers"][normalized]
+
+    # Try case-insensitive match
+    normalized_lower = normalized.lower()
+    for key, data in MOCK_DB["customers"].items():
+        if key.lower() == normalized_lower:
+            return key, data
+
+    return None, None
 
 
 MOCK_DB: Dict[str, Dict] = {
     "customers": {
-        "user123": {
+        "John123": {
             "pin": "1234",
             "name": "John Doe",
             "profile": {
@@ -72,7 +129,7 @@ MOCK_DB: Dict[str, Dict] = {
         }
     },
     "cards": {
-        "card_123": {"customer_id": "user123", "status": "active"}
+        "card_123": {"customer_id": "John123", "status": "active"}
     },
     "disputes": {},
 }
@@ -87,28 +144,31 @@ def verify_identity(customer_id: str, pin: str) -> bool:
 
 
 def verify_identity_raw(customer_id: str, pin: str) -> bool:
-    customer = MOCK_DB["customers"].get(customer_id)
-    if not customer:
+    # Find customer with case-insensitive matching
+    found_key, customer = _find_customer(customer_id)
+    if not found_key or not customer:
         return False
-    # Simple whitespace stripping only - assuming reliable STT or numeric input
-    normalized = (pin or "").strip()
-    if len(normalized) < 4 or len(normalized) > 6:
+
+    # Normalize PIN to handle voice transcription variations
+    normalized_pin = _normalize_pin(pin)
+    if len(normalized_pin) < 4 or len(normalized_pin) > 6:
         return False
-    if customer["pin"] != normalized:
+    if customer["pin"] != normalized_pin:
         return False
-    current = _VERIFIED_CUSTOMERS_CTX.get()
-    _VERIFIED_CUSTOMERS_CTX.set(current | {customer_id})
+
+    # Store the actual key from MOCK_DB for consistent verification checks
+    _VERIFIED_CUSTOMERS.add(found_key)
     return True
 
 
 @tool
 def get_verification_status(customer_id: str) -> Dict:
-    """Return verification status for the current session."""
+    """Return verification status for the customer."""
     if not _is_tool_enabled("get_verification_status"):
         return {"verified": False, "error": "tool_disabled"}
-    
-    is_ver = _is_verified(customer_id)
-    return {"verified": is_ver}
+    found_key, _ = _find_customer(customer_id)
+    is_ver = _is_verified(found_key) if found_key else False
+    return {"verified": is_ver, "customer_id": found_key or _normalize_customer_id(customer_id)}
 
 
 @tool
@@ -116,14 +176,14 @@ def get_account_balance(customer_id: str) -> Dict:
     """Return the customer's account balance details (requires verification)."""
     if not _is_tool_enabled("get_account_balance"):
         return {"error": "tool_disabled"}
-    if not _is_verified(customer_id):
+    found_key, customer = _find_customer(customer_id)
+    if not found_key or not _is_verified(found_key):
         return {"error": "identity_not_verified"}
-    customer = MOCK_DB["customers"].get(customer_id)
     if not customer:
         return {"error": "customer_not_found"}
     acct = customer["accounts"][0]
     return {
-        "customer_id": customer_id,
+        "customer_id": found_key,
         "account_id": acct["account_id"],
         "type": acct["type"],
         "available": acct["available"],
@@ -137,14 +197,14 @@ def get_customer_profile(customer_id: str) -> Dict:
     """Return the customer's basic profile details (requires verification)."""
     if not _is_tool_enabled("get_customer_profile"):
         return {"error": "tool_disabled"}
-    if not _is_verified(customer_id):
+    found_key, customer = _find_customer(customer_id)
+    if not found_key or not _is_verified(found_key):
         return {"error": "identity_not_verified"}
-    customer = MOCK_DB["customers"].get(customer_id)
     if not customer:
         return {"error": "customer_not_found"}
     profile = customer.get("profile") or {}
     return {
-        "customer_id": customer_id,
+        "customer_id": found_key,
         "name": customer.get("name"),
         "address": profile.get("address"),
         "phone": profile.get("phone"),
@@ -157,9 +217,9 @@ def get_recent_transactions(customer_id: str, count: int = 3) -> List[Dict]:
     """Return the customer's most recent transactions (requires verification)."""
     if not _is_tool_enabled("get_recent_transactions"):
         return [{"error": "tool_disabled"}]
-    if not _is_verified(customer_id):
+    found_key, customer = _find_customer(customer_id)
+    if not found_key or not _is_verified(found_key):
         return [{"error": "identity_not_verified"}]
-    customer = MOCK_DB["customers"].get(customer_id)
     if not customer:
         return [{"error": "customer_not_found"}]
     safe_count = max(1, min(int(count), 20))
@@ -192,9 +252,9 @@ def get_customer_cards(customer_id: str) -> List[Dict]:
     """List a customer's cards (requires verification)."""
     if not _is_tool_enabled("get_customer_cards"):
         return [{"error": "tool_disabled"}]
-    if not _is_verified(customer_id):
+    found_key, customer = _find_customer(customer_id)
+    if not found_key or not _is_verified(found_key):
         return [{"error": "identity_not_verified"}]
-    customer = MOCK_DB["customers"].get(customer_id)
     if not customer:
         return [{"error": "customer_not_found"}]
     return customer["cards"]
@@ -205,9 +265,9 @@ def request_statement(customer_id: str, period: str) -> Dict:
     """Request a monthly statement for a given period (YYYY-MM) (requires verification)."""
     if not _is_tool_enabled("request_statement"):
         return {"error": "tool_disabled"}
-    if not _is_verified(customer_id):
+    found_key, customer = _find_customer(customer_id)
+    if not found_key or not _is_verified(found_key):
         return {"error": "identity_not_verified"}
-    customer = MOCK_DB["customers"].get(customer_id)
     if not customer:
         return {"error": "customer_not_found"}
     for s in customer["statements"]:
@@ -221,9 +281,9 @@ def update_address(customer_id: str, new_address: str) -> Dict:
     """Update the customer's profile address (requires verification)."""
     if not _is_tool_enabled("update_address"):
         return {"error": "tool_disabled"}
-    if not _is_verified(customer_id):
+    found_key, customer = _find_customer(customer_id)
+    if not found_key or not _is_verified(found_key):
         return {"error": "identity_not_verified"}
-    customer = MOCK_DB["customers"].get(customer_id)
     if not customer:
         return {"error": "customer_not_found"}
     customer["profile"]["address"] = new_address.strip()
@@ -235,13 +295,14 @@ def report_cash_not_dispensed(customer_id: str, atm_id: str, amount: float, date
     """Submit a dispute for an ATM cash-not-dispensed incident (requires verification)."""
     if not _is_tool_enabled("report_cash_not_dispensed"):
         return {"error": "tool_disabled"}
-    if not _is_verified(customer_id):
+    found_key, customer = _find_customer(customer_id)
+    if not found_key or not _is_verified(found_key):
         return {"error": "identity_not_verified"}
-    if customer_id not in MOCK_DB["customers"]:
+    if not customer:
         return {"error": "customer_not_found"}
     dispute_id = f"disp_{int(time.time())}"
     MOCK_DB["disputes"][dispute_id] = {
-        "customer_id": customer_id,
+        "customer_id": found_key,
         "type": "cash_not_dispensed",
         "atm_id": atm_id,
         "amount": amount,
