@@ -332,7 +332,6 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 
                 verified_customer_id, attempts_delta, verified_now = _extract_verify_success(all_tool_calls, result.get("messages") or [])
                 tool_calls = _sanitize_tool_calls(all_tool_calls)
-                bot_response = _apply_sensitive_guardrail(agent_text=bot_response, messages=result.get("messages") or [], customer_id=current_customer_id)
 
                 # Update Session State
                 now_ts = time.time()
