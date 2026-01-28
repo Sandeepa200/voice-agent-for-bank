@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 python-dotenv
 langchain
 langchain-groq
@@ -11,3 +11,4 @@ httpx
 pydantic
 python-multipart
 supabase
+websockets

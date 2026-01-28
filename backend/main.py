@@ -23,7 +23,7 @@ if os.environ.get("LANGCHAIN_API_KEY") or os.environ.get("LANGSMITH_API_KEY"):
     os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
     os.environ.setdefault("LANGCHAIN_PROJECT", "bank-abc-voice-agent")
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -259,6 +259,179 @@ def _extract_retry_after_seconds(exc: Exception) -> Optional[int]:
     minutes = int(m.group(1))
     seconds = float(m.group(2))
     return int(max(0, minutes * 60 + seconds))
+
+# --- WebSocket Implementation ---
+
+@app.websocket("/ws/chat/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    await websocket.accept()
+    
+    # Initialize Session
+    env_key = "dev"
+    customer_id = "guest"
+    
+    # Check if this client_id is actually a session_id we know about (reconnection)
+    session_id = client_id
+    existing_session = None
+    if USE_DB:
+        existing_session = await get_session(session_id)
+    else:
+        existing_session = SESSIONS.get(session_id)
+        
+    if not existing_session:
+        # Create new session if not found
+        session_id = await _new_session_db(customer_id, env_key) if USE_DB else _new_session(customer_id)
+    else:
+        customer_id = existing_session.get("customer_id") or "guest"
+        
+    if USE_DB:
+        await _load_runtime_config(env_key)
+
+    try:
+        while True:
+            # Wait for message
+            # We expect either JSON (config) or Bytes (Audio)
+            message = await websocket.receive()
+            
+            if "text" in message:
+                # Handle JSON config/control messages
+                try:
+                    data = json.loads(message["text"])
+                    if data.get("type") == "config":
+                        # Update any session config if needed
+                        pass
+                except:
+                    pass
+                continue
+                
+            if "bytes" in message:
+                audio_content = message["bytes"]
+                
+                # --- Process Audio Turn ---
+                
+                # 1. Load Session State
+                if USE_DB:
+                    session = await get_session(session_id)
+                    if not session or session.get("ended"):
+                        await websocket.send_json({"type": "error", "message": "Session ended"})
+                        break
+                else:
+                    session = SESSIONS.get(session_id)
+                    if not session or session.get("ended"):
+                        await websocket.send_json({"type": "error", "message": "Session ended"})
+                        break
+
+                # Hydrate verification state
+                current_customer_id = session.get("customer_id") or "guest"
+                is_verified_session = bool(session.get("verified_identity"))
+                set_verification_state(current_customer_id, is_verified_session)
+                
+                # 2. Transcribe
+                user_text = await transcribe_audio(audio_content)
+                if not user_text:
+                    await websocket.send_json({"type": "error", "message": "Could not transcribe audio"})
+                    continue
+                    
+                # Send transcript back to client immediately
+                await websocket.send_json({"type": "transcript", "text": user_text, "role": "user"})
+
+                # 3. Agent Reasoning
+                if USE_DB:
+                    turns = await get_turns(session_id)
+                    messages = []
+                    for t in turns:
+                        if t.get("user_transcript"):
+                            messages.append(HumanMessage(content=t["user_transcript"]))
+                        if t.get("agent_response"):
+                            messages.append(AIMessage(content=t["agent_response"]))
+                    messages.append(HumanMessage(content=user_text))
+                else:
+                    session["messages"].append(HumanMessage(content=user_text))
+                    messages = session["messages"]
+
+                inputs = {"messages": messages, "customer_id": current_customer_id, "flow": None}
+                
+                try:
+                    result = agent_app.invoke(
+                        inputs,
+                        config={
+                            "run_name": f"bank-abc-call-turn:{session_id}",
+                            "metadata": {"session_id": session_id, "customer_id": current_customer_id},
+                            "tags": ["bank-abc", "voice-agent"],
+                        },
+                    )
+                except Exception as e:
+                    if _is_rate_limited_error(e):
+                        await websocket.send_json({"type": "error", "message": "Rate limit reached. Please wait."})
+                        continue
+                    print(f"Agent Error: {e}")
+                    await websocket.send_json({"type": "error", "message": "System error processing request"})
+                    continue
+
+                # 4. Process Response & Guardrails
+                bot_response = _sanitize_agent_text(result["messages"][-1].content or "")
+                
+                # Handle Tool Calls & Verification
+                all_tool_calls = []
+                for m in result.get("messages") or []:
+                    tcs = getattr(m, "tool_calls", None) or []
+                    if isinstance(tcs, list) and tcs:
+                        all_tool_calls.extend(tcs)
+                
+                verified_customer_id, attempts_delta, verified_now = _extract_verify_success(all_tool_calls, result.get("messages") or [])
+                tool_calls = _sanitize_tool_calls(all_tool_calls)
+                bot_response = _apply_sensitive_guardrail(agent_text=bot_response, messages=result.get("messages") or [], customer_id=current_customer_id)
+
+                # Update Session State
+                now_ts = time.time()
+                if USE_DB:
+                    await append_turn(session_id=session_id, ts=now_ts, user_transcript=user_text, agent_response=bot_response, tool_calls=tool_calls)
+                    if attempts_delta or verified_now:
+                        next_attempts = int(session.get("verification_attempts") or 0) + int(attempts_delta)
+                        await set_verification(session_id, verified_identity=bool(verified_now or session.get("verified_identity")), verification_attempts=next_attempts)
+                    if verified_now and verified_customer_id:
+                        await set_customer_id(session_id, customer_id=verified_customer_id)
+                else:
+                    session["messages"] = result["messages"]
+                    session["updated_at"] = now_ts
+                    if attempts_delta:
+                        session["verification_attempts"] = int(session.get("verification_attempts") or 0) + int(attempts_delta)
+                    if verified_now:
+                        session["verified_identity"] = True
+                    if verified_now and verified_customer_id:
+                        session["customer_id"] = verified_customer_id
+                    session["turns"].append({
+                        "ts": session["updated_at"],
+                        "user_transcript": user_text,
+                        "agent_response": bot_response,
+                        "tool_calls": tool_calls,
+                    })
+
+                # 5. Synthesize & Send Response
+                final_is_verified = verified_now or is_verified_session
+                
+                # Send text response first
+                await websocket.send_json({
+                    "type": "response", 
+                    "text": bot_response, 
+                    "role": "agent",
+                    "is_verified": final_is_verified
+                })
+                
+                # Synthesize audio
+                audio_bytes = await synthesize_audio(bot_response)
+                if audio_bytes:
+                    # Send binary audio
+                    await websocket.send_bytes(audio_bytes)
+
+    except WebSocketDisconnect:
+        print(f"Client {client_id} disconnected")
+    except Exception as e:
+        print(f"WebSocket Error: {e}")
+        try:
+            await websocket.close()
+        except:
+            pass
 
 
 @app.post("/call/start")

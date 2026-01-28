@@ -9,7 +9,10 @@ interface Message {
 }
 
 // Get API URL from env or default to localhost
-const API_URL = import.meta.env.VITE_API_URL || '';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// WebSocket URL - derived from API_URL
+const WS_URL = API_URL.replace(/^http/, 'ws') + '/ws/chat';
+
 const ONNX_WASM_BASE_PATH = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
 const VAD_BASE_ASSET_PATH = 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/';
 const ENV_KEY = 'dev';
@@ -52,6 +55,7 @@ function App() {
 
   const sessionIdRef = useRef<string | null>(null);
   const callActiveRef = useRef(false);
+  const wsRef = useRef<WebSocket | null>(null);
 
   const isPlayingRef = useRef(false);
   const busyRef = useRef(false);
@@ -269,20 +273,36 @@ function App() {
   useEffect(() => {
     return () => {
       void stopCapture();
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
     };
   }, []);
 
-  const playAudioResponse = async (base64Audio: string | null) => {
-    if (!base64Audio) return;
+  const playAudioResponse = async (arrayBuffer: ArrayBuffer) => {
+    if (!arrayBuffer || arrayBuffer.byteLength === 0) return;
     isPlayingRef.current = true;
     busyRef.current = true;
     await pauseCapture();
     try {
-      const audio = new Audio(`data:audio/mp3;base64,${base64Audio}`);
+      // Create a blob from the array buffer
+      const blob = new Blob([arrayBuffer], { type: 'audio/mpeg' });
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      
       await new Promise<void>((resolve) => {
-        audio.onended = () => resolve();
-        audio.onerror = () => resolve();
-        audio.play().catch(() => resolve());
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        audio.onerror = () => {
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        audio.play().catch(() => {
+          URL.revokeObjectURL(url);
+          resolve();
+        });
       });
     } finally {
       isPlayingRef.current = false;
@@ -292,59 +312,108 @@ function App() {
   };
 
   const sendTurn = async (audioBlob: Blob) => {
-    if (!sessionIdRef.current) return;
-    const pendingTranscript = '(transcribing...)';
-    setMessages((prev) => [...prev, { role: 'user', text: pendingTranscript }]);
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      console.warn("WebSocket not open, cannot send audio");
+      return;
+    }
+    
+    // Optimistic UI update
+    setMessages((prev) => [...prev, { role: 'user', text: '(transcribing...)' }]);
     setIsLoading(true);
     busyRef.current = true;
+    
     try {
-      const formData = new FormData();
-      formData.append('audio', audioBlob, 'utterance.wav');
-      formData.append('session_id', sessionIdRef.current);
-
-      const response = await axios.post(`${API_URL}/call/turn`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-
-      const { user_transcript, agent_response, audio_base64, is_verified } = response.data as {
-        user_transcript: string;
-        agent_response: string;
-        audio_base64: string | null;
-        is_verified?: boolean;
-      };
-      
-      if (typeof is_verified === 'boolean') {
-        setIsVerified(is_verified);
-      }
-
-      setMessages((prev) => {
-        const next = [...prev];
-        for (let i = next.length - 1; i >= 0; i -= 1) {
-          if (next[i].role === 'user' && next[i].text === pendingTranscript) {
-            next[i] = { role: 'user', text: user_transcript };
-            break;
-          }
-        }
-        next.push({ role: 'agent', text: agent_response });
-        return next;
-      });
-      await playAudioResponse(audio_base64);
+      // Send binary audio data directly
+      wsRef.current.send(audioBlob);
     } catch (error) {
-      setMessages((prev) => {
-        const next = [...prev];
-        for (let i = next.length - 1; i >= 0; i -= 1) {
-          if (next[i].role === 'user' && next[i].text === pendingTranscript) {
-            next[i] = { role: 'user', text: '(could not transcribe)' };
-            break;
-          }
-        }
-        return next;
-      });
-      throw error;
-    } finally {
+      console.error("Error sending audio:", error);
       setIsLoading(false);
       busyRef.current = false;
+      setMessages((prev) => {
+        const next = [...prev];
+        if (next.length > 0 && next[next.length - 1].text === '(transcribing...)') {
+           next[next.length - 1].text = '(error sending audio)';
+        }
+        return next;
+      });
     }
+  };
+
+  const connectWebSocket = (sessionId: string) => {
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+
+    const wsUrl = `${WS_URL}/${sessionId}`;
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+    ws.binaryType = 'arraybuffer'; // Important for receiving audio bytes
+
+    ws.onopen = () => {
+      console.log('WebSocket Connected');
+      setCallStatus('active');
+      callActiveRef.current = true;
+      startCapture(); // Start mic once connected
+    };
+
+    ws.onmessage = async (event) => {
+      // Handle Binary Audio
+      if (event.data instanceof ArrayBuffer) {
+        await playAudioResponse(event.data);
+        return;
+      }
+
+      // Handle JSON Text
+      try {
+        const data = JSON.parse(event.data);
+        
+        if (data.type === 'transcript') {
+           // Update user transcript
+           setMessages((prev) => {
+            const next = [...prev];
+            // Find the last pending user message
+            for (let i = next.length - 1; i >= 0; i--) {
+              if (next[i].role === 'user' && next[i].text === '(transcribing...)') {
+                next[i] = { role: 'user', text: data.text };
+                return next;
+              }
+            }
+            // If not found (race condition?), append it
+            return [...prev, { role: 'user', text: data.text }];
+           });
+        } 
+        else if (data.type === 'response') {
+          setIsLoading(false);
+          // busyRef.current is NOT cleared here, we wait for audio
+          setMessages((prev) => [...prev, { role: 'agent', text: data.text }]);
+          if (typeof data.is_verified === 'boolean') {
+            setIsVerified(data.is_verified);
+          }
+        }
+        else if (data.type === 'error') {
+           setIsLoading(false);
+           busyRef.current = false;
+           console.error("Server Error:", data.message);
+           setErrorMessage(data.message);
+        }
+      } catch (e) {
+        console.error("Error parsing WS message:", e);
+      }
+    };
+
+    ws.onclose = () => {
+      console.log('WebSocket Disconnected');
+      if (callActiveRef.current) {
+        setCallStatus('idle');
+        callActiveRef.current = false;
+        stopCapture();
+      }
+    };
+
+    ws.onerror = (e) => {
+      console.error('WebSocket Error:', e);
+      setErrorMessage("Connection error. Please try again.");
+    };
   };
 
   const startCall = async () => {
@@ -353,6 +422,9 @@ function App() {
     setErrorMessage(null);
     try {
       const formData = new FormData();
+      // We still use HTTP to initialize the session and get the welcome message
+      // This is a hybrid approach: HTTP for handshake/init, WS for turns.
+      // Alternatively, we could do everything over WS, but keeping HTTP init is easier for now.
       const resp = await axios.post(`${API_URL}/call/start`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
@@ -365,12 +437,21 @@ function App() {
       };
 
       sessionIdRef.current = session_id;
-      callActiveRef.current = true;
-      setCallStatus('active');
       setIsVerified(!!is_verified);
       setMessages([{ role: 'agent', text: agent_response }]);
-      await playAudioResponse(audio_base64);
-      await startCapture();
+      
+      // Play welcome message
+      if (audio_base64) {
+         // Convert base64 to array buffer for our new player logic? 
+         // Or just use the old logic for the welcome message.
+         // Let's reuse the old logic for the HTTP response
+         const audio = new Audio(`data:audio/mp3;base64,${audio_base64}`);
+         await audio.play();
+      }
+      
+      // Connect WS
+      connectWebSocket(session_id);
+
     } catch (error) {
       console.error(error);
       const msg = formatStartCallError(error);
@@ -387,11 +468,14 @@ function App() {
       setCallStatus('idle');
       callActiveRef.current = false;
       void stopCapture();
+      if (wsRef.current) wsRef.current.close();
       return;
     }
     setCallStatus('ending');
     callActiveRef.current = false;
     void stopCapture();
+    if (wsRef.current) wsRef.current.close();
+    
     try {
       const formData = new FormData();
       formData.append('session_id', sessionIdRef.current);
@@ -401,7 +485,10 @@ function App() {
 
       const { agent_response, audio_base64 } = resp.data as { agent_response: string; audio_base64: string | null };
       setMessages((prev) => [...prev, { role: 'agent', text: agent_response }]);
-      await playAudioResponse(audio_base64);
+       if (audio_base64) {
+         const audio = new Audio(`data:audio/mp3;base64,${audio_base64}`);
+         await audio.play();
+      }
     } catch (error) {
       console.error(error);
     } finally {
