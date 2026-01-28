@@ -46,7 +46,7 @@ def _is_verified(customer_id: str) -> bool:
 
 MOCK_DB: Dict[str, Dict] = {
     "customers": {
-        "user123": {
+        "John123": {
             "pin": "1234",
             "name": "John Doe",
             "profile": {
@@ -72,7 +72,7 @@ MOCK_DB: Dict[str, Dict] = {
         }
     },
     "cards": {
-        "card_123": {"customer_id": "user123", "status": "active"}
+        "card_123": {"customer_id": "John123", "status": "active"}
     },
     "disputes": {},
 }

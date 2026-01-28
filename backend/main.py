@@ -597,7 +597,7 @@ async def admin_put_routing(payload: RoutingRulesUpdate, env: str = "dev"):
 
 
 @app.post("/chat")
-async def chat_endpoint(audio: UploadFile = File(...), customer_id: str = Form("user123")):
+async def chat_endpoint(audio: UploadFile = File(...), customer_id: str = Form("John123")):
     session_id = await _new_session_db(customer_id, "dev") if USE_DB else _new_session(customer_id)
     return {"session_id": session_id, **(await call_turn(audio=audio, session_id=session_id))}
 

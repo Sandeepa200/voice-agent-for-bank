@@ -10,7 +10,7 @@ This repo deploys as a single Vercel project (one domain):
 
 ## 🔑 Test Credentials
 Use these credentials to verify identity and access protected flows (e.g., "Check Balance", "Block Card"):
-- **Customer ID**: `user123`
+- **Customer ID**: `John123`
 - **PIN**: `1234`
 
 ## 🛠 Setup Instructions
