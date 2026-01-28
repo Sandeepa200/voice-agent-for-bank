@@ -132,7 +132,9 @@ def _encode_audio(audio_bytes: Optional[bytes]) -> Optional[str]:
     return base64.b64encode(audio_bytes).decode("utf-8")
 
 def _sanitize_agent_text(text: str) -> str:
+    # Remove function call tags (both opening with content and closing tags)
     cleaned = re.sub(r"<function=[^>]+>\{.*?\}", "", text)
+    cleaned = re.sub(r"</function>", "", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     return cleaned.strip()
 
