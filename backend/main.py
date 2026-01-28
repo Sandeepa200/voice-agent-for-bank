@@ -81,7 +81,8 @@ origins = [
     "http://localhost:5173",
     "http://localhost:3000",
     "https://voice-agent-for-bank.vercel.app",
-    "https://voice-agent-for-bank.onrender.com"
+    "https://voice-agent-for-bank.onrender.com",
+    "https://voice-agent-for-bank-with-websocket.vercel.app"
 ]
 vercel_url = os.environ.get("VERCEL_URL")
 if vercel_url:
