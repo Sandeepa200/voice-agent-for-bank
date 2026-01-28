@@ -77,10 +77,15 @@ app = FastAPI(title="Bank ABC Voice Agent", lifespan=lifespan, root_path=os.envi
 
 # CORS Configuration
 # Allow all origins locally. On Vercel, trust the Vercel URL.
-origins = ["*"]
+origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://voice-agent-for-bank.vercel.app",
+    "https://voice-agent-for-bank.onrender.com"
+]
 vercel_url = os.environ.get("VERCEL_URL")
 if vercel_url:
-    origins = [f"https://{vercel_url}"]
+    origins.append(f"https://{vercel_url}")
 
 app.add_middleware(
     CORSMiddleware,
