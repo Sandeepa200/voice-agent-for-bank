@@ -80,6 +80,11 @@ Use these credentials to verify identity and access protected flows (e.g., "Chec
    - Say: *"Block my card."*
    - Agent should ask for verification first (if not already verified) and confirm the reason.
 
+
+## Demo & Trace Evidence: "Balance Check" scenario
+
+https://smith.langchain.com/public/0d75eabc-e192-42d0-87d0-7e537d9f281c/r (https://smith.langchain.com/public/0d75eabc-e192-42d0-87d0-7e537d9f281c/r)
+
 ## 🌐 Deployment Strategy: Vercel vs. Render (WebSocket)
 
 ### 1. The Constraints
