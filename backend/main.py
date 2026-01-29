@@ -16,7 +16,6 @@ env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 # Ensure backend directory is in sys.path so 'app' package can be imported
-import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 if os.environ.get("LANGCHAIN_API_KEY") or os.environ.get("LANGSMITH_API_KEY"):
@@ -132,7 +131,9 @@ def _encode_audio(audio_bytes: Optional[bytes]) -> Optional[str]:
     return base64.b64encode(audio_bytes).decode("utf-8")
 
 def _sanitize_agent_text(text: str) -> str:
+    # Remove function call tags (both opening with content and closing tags)
     cleaned = re.sub(r"<function=[^>]+>\{.*?\}", "", text)
+    cleaned = re.sub(r"</function>", "", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     return cleaned.strip()
 
